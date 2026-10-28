@@ -35,6 +35,9 @@ export function previewOrigin(value: string) {
 // store can perform I/O; deployment binds that store solely to its own new RPCs.
 export function createIntakeHandler(config: IntakeConfig, store: IntakeStore) {
   return async (req: Request) => {
+    // Set only after this request proves the exact capture route and Origin.
+    // Private exchange errors and foreign origins must never inherit CORS.
+    let captureCors: Record<string, string> = {}
     try {
       check(
         config.enabled === 'synthetic-preview' && previewOrigin(config.origin),
@@ -58,6 +61,7 @@ export function createIntakeHandler(config: IntakeConfig, store: IntakeStore) {
           vary: 'Origin',
           'cache-control': 'no-store',
         }
+        captureCors = cors
         if (req.method === 'OPTIONS') {
           return new Response(null, {
             status: 204,
@@ -141,7 +145,7 @@ export function createIntakeHandler(config: IntakeConfig, store: IntakeStore) {
         {
           error: message,
         },
-        { status, headers: { 'cache-control': 'no-store' } },
+        { status, headers: { 'cache-control': 'no-store', ...captureCors } },
       )
     }
   }

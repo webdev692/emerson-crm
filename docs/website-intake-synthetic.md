@@ -21,6 +21,10 @@ the new producer.
   `pilot-<fictional-slug>@intake.invalid`. Names begin `PILOT TEST`; resources
   begin `PILOT-`. HR/application workflows and arbitrary narrative/resume fields
   are rejected. Browser Origin is a synthetic gate, not authentication.
+  After the exact capture route and Origin pass validation, capture errors retain
+  that exact Origin's CORS headers so the preview can read validation, collision
+  and throttle statuses. Foreign origins and private pull/ack errors receive no
+  CORS headers; private errors do not fabricate a response signature.
 - Private POST `/pull` and `/ack`: independent 32-byte HMAC key, exact canonical
   public URL/project/audience/body hash, timestamp within 120 seconds and UUIDv4
   nonce. Every accepted nonce is stored atomically; replay is rejected.

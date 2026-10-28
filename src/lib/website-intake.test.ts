@@ -24,6 +24,46 @@ export const fictionalCapture = () => ({
   resourceId: 'PILOT-SERVICE',
 })
 describe('synthetic intake contract', () => {
+  it('exposes capture error statuses only to the validated preview Origin', async () => {
+    let result = 'collision'
+    const handler = createIntakeHandler(
+      { enabled: 'synthetic-preview', origin, secret },
+      {
+        capture: () => Promise.resolve(result),
+        exchange: () => Promise.resolve({}),
+      },
+    )
+    const request = (body: unknown, source = origin, route = 'capture') =>
+      new Request(`${ENDPOINT}/${route}`, {
+        method: 'POST',
+        headers: { origin: source, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    for (const [body, status] of [
+      [{ ...fictionalCapture(), email: 'real@example.com' }, 400],
+      [fictionalCapture(), 409],
+    ] as const) {
+      const response = await handler(request(body))
+      expect(response.status).toBe(status)
+      expect(response.headers.get('access-control-allow-origin')).toBe(origin)
+      expect(response.headers.get('vary')).toBe('Origin')
+    }
+    result = 'rate_limited'
+    const limited = await handler(request(fictionalCapture()))
+    expect(limited.status).toBe(429)
+    expect(limited.headers.get('access-control-allow-origin')).toBe(origin)
+    const foreign = await handler(
+      request(fictionalCapture(), 'https://foreign.invalid'),
+    )
+    expect(foreign.status).toBe(403)
+    expect(foreign.headers.get('access-control-allow-origin')).toBeNull()
+    for (const route of ['pull', 'ack']) {
+      const denied = await handler(request({}, origin, route))
+      expect(denied.status).toBe(401)
+      expect(denied.headers.get('access-control-allow-origin')).toBeNull()
+      expect(denied.headers.get('x-intake-signature')).toBeNull()
+    }
+  })
   it('keeps the CRM and captured producer protocol identical', async () => {
     const crm = await readFile(
       new URL(
