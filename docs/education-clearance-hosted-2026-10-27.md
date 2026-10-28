@@ -31,9 +31,17 @@ Each decision and exact outbox body remains append-only/immutable.
 
 `netlify/functions/lib/education-hosted-profile.json` contains only non-secret
 deployment pins: site ID, canonical CRM/backend origins, database name/identity,
-fictional source key and explicitly verified existing reviewer UUID/email pairs.
-The checked-in profile has `enabled: false`, null target/database pins and no
-reviewers. Runtime URL variables cannot replace these pins.
+fictional source key and explicitly verified existing reviewer commitments. Each
+reviewer has `memberIdSha256 = SHA256(exact lowercase UUID)` and
+`identitySha256 = SHA256(UUID + '|' + lowercase email)`, encoded as lowercase hex.
+The email must already have no surrounding whitespace. These commitments hide
+the raw account UUID/address from public source; they are not credentials and
+never replace current authentication, invited/confirmed Identity verification
+or active owner/HR membership checks.
+The initial reviewed profile has verified target/database pins and reviewer
+commitments with `enabled: false`. A separately reviewed enablement release can
+change that boolean while preserving the seed's immutable snapshot and every
+other pin. Runtime URL variables cannot replace these pins.
 
 Migration `20261027132453_hosted_education_identity` was generated using the
 repository's pinned Drizzle tool. It adds an immutable operator identity table,
@@ -46,6 +54,11 @@ verified bridge marker after the actual hosted database, reviewer account and
 target have been checked. The marker must match the compiled
 database/site/origins/source/reviewer pins; RLS, trigger and grant readiness is
 checked before every education transaction. The marker has no browser/API writer.
+Its private `reviewer_ids` values remain exact UUIDs. The runtime hashes those IDs
+to match the compiled ID commitments without consulting mutable email values.
+Email/role revocation therefore invalidates the earlier reviewer while another
+currently authorized HR reviewer can still queue a hold or revocation; it does
+not turn the immutable marker into an unavailable database identity.
 
 Migration `20261027142059_hosted_receiver_observations` adds a separate hosted
 append-only operator observation stream. The existing one-shot local checkpoint
@@ -66,11 +79,57 @@ have null deployment pins. The seed has an exact `netlifydb` guard, verifies the
 existing owner membership and aborts on any fixture/marker collision. It inserts
 four fictional HR-scoped records, the immutable marker and explicit audit rows;
 it never writes staff, roles, decisions, outbox, clearance or receiver state.
-Current server-side Identity verification is an independent prerequisite; the
-historical owner UUID in the template is not proof of current authorization.
+The seed selects exactly one existing active owner by both compiled hash pins;
+it contains no raw owner UUID/email and does not create or grant membership.
+Current server-side Identity verification is an independent prerequisite; a hash
+match alone is not proof of current authorization. Public tests rehearse the
+same template/control flow with explicit fictional hash substitutions. An exact
+configured production seed must reject a local fictional owner whose hashes do
+not match; positive local execution is not claimed for those production bytes.
+
+Forward migration `20261028153655_hosted-synthetic-hash-pinned-seed` renders that
+template using the exact production database and existing owner commitments
+verified read-only on October 28. It records the hash of the reviewed disabled
+profile bytes as audit provenance. Those exact LF bytes are retained permanently
+in `docs/operator-migrations/20261028153655-hosted-seed-profile.json`, with SHA-256
+`117a911b086c9b185b4975476f31129ef4c4f1fdb6b0affac67840f910d553c8`.
+The audit binds this immutable snapshot, rather than every later runtime profile
+serialization. Tests permit the runtime `enabled` boolean to change while every
+other key, target, source, identity and reviewer pin must still match the snapshot.
+Changed, missing or additional pins are rejected. Enabling the runtime must never
+require editing an applied seed or changing its audit hash.
+
+Native Identity detail and the active owner membership were matched; current
+invited/confirmed Identity remains independently required by the server before
+any decision. The seed inserts no observation, decision, outbox, staff, account or
+permission. The seven earlier applied migrations remain unchanged. The CRM marker
+identity names this immutable bridge scope, not a receiver's physical database
+instance; replacing an EPDG instance does not replace the CRM marker UUID.
+
+Disposable SQL fixtures use a compiled test-only operator-DML registry with exact
+name, path, SHA-256, type and reason. Its current default contains only this seed.
+Every registered file must exist and match its bytes; every unregistered
+directory is applied normally, including similarly named directories. A future
+receiver observation can be registered only after its actual capture and exact
+reviewed file/hash exist. No observation or timestamp is fabricated for tests.
+The registry returns each deferred SQL body and retains `seedSql` compatibility.
+Comment-only fictional unit fixtures prove that additional exact entries still
+reject missing or changed bytes; they are never accepted receiver observations.
+
+A separate fresh loopback `netlifydb` rehearsal must reject the exact configured
+seed without effects when only a fictional owner exists. Its positive control
+substitutes only the two fictional reviewer commitments, preserving the actual
+database/source/fixture guards and showing unchanged member rows and no decision
+or receiver state. Narrow `.gitattributes` rules preserve the reviewed seed,
+runtime profile and immutable profile snapshot LF bytes across checkouts.
 
 Apply schema and the configured seed once through reviewed migrations, with the
-hosted profile/runtime disabled until verified. These steps have no short clock
+hosted profile/runtime disabled. Verify the resulting marker, fixtures and exact
+owner/target before a separately reviewed enablement release. The second release
+may change only the runtime enablement boolean while preserving the immutable
+snapshot and applied seed bytes. Receiver readiness and a fresh verified
+observation remain independent gates; enabling the profile without an
+observation authorizes no decisions. These setup steps have no short clock
 window. Complete packaging/provider/authentication checks before capturing a
 receiver observation. The separate observation migration records a real captured
 timestamp, exact receiver version, canonical state SHA-256 and a private evidence

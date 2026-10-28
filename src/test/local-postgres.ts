@@ -2,7 +2,7 @@
 // cluster and never reads a connection string, .env, runtime key or hosted data.
 import { execFile, spawn } from 'node:child_process'
 import { randomInt, randomUUID } from 'node:crypto'
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { createServer } from 'node:net'
 import { dirname, join, resolve } from 'node:path'
@@ -10,6 +10,7 @@ import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import * as schema from '../../db/schema'
+import { rehearsalMigrationPlan } from './rehearsal-migrations'
 
 export interface LocalPgPool {
   query<Row = Record<string, unknown>>(
@@ -163,12 +164,8 @@ export async function createLocalPostgres(label = 'education') {
       dirname(fileURLToPath(import.meta.url)),
       '../../netlify/database/migrations',
     )
-    migrations.push(
-      ...(await readdir(migrationRoot, { withFileTypes: true }))
-        .filter((entry) => entry.isDirectory())
-        .map((entry) => entry.name)
-        .sort(),
-    )
+    const plan = await rehearsalMigrationPlan(migrationRoot)
+    migrations.push(...plan.schemaMigrations)
     for (const migration of migrations) {
       const sql = await readFile(
         join(migrationRoot, migration, 'migration.sql'),
@@ -188,6 +185,7 @@ export async function createLocalPostgres(label = 'education') {
           hostedConnections: false,
           syntheticAddressesOnly: true,
           migrations,
+          deferredOperatorDml: plan.deferredOperatorDml,
           adapter:
             'drizzle-orm/node-postgres; production handler/schema; mocked Identity/database factory only',
           operationalKeysRead: false,

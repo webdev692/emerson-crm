@@ -3,9 +3,10 @@ import {
   educationHostedIdentity,
   educationHostedObservations,
 } from '../../../db/schema'
-import { FIXTURE_IDS } from './education-handoff.mts'
+import { FIXTURE_IDS, isProtocolUuid } from './education-handoff.mts'
 import {
   hostedReviewerAllowed,
+  hostedReviewerIdSha256,
   parseHostedEducationProfile,
   serializeHostedDecision,
 } from './education-hosted.mts'
@@ -55,8 +56,11 @@ export async function checkHostedEducationDatabase(
       marker.sourceKey === profile.fixtureSourceKey &&
       marker.syntheticOnly === true &&
       Array.isArray(marker.reviewerIds) &&
-      JSON.stringify([...marker.reviewerIds].sort()) ===
-        JSON.stringify(profile.reviewers.map((r) => r.memberId).sort()),
+      marker.reviewerIds.every(
+        (id) => typeof id === 'string' && isProtocolUuid(id),
+      ) &&
+      JSON.stringify(marker.reviewerIds.map(hostedReviewerIdSha256).sort()) ===
+        JSON.stringify(profile.reviewers.map((r) => r.memberIdSha256).sort()),
   )
   const readiness = await tx.execute(sql`SELECT
     (SELECT c.relrowsecurity FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace

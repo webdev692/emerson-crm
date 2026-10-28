@@ -3,10 +3,15 @@
   "enabled": false,
   "environment": "synthetic-hosted",
   "siteId": "c83673f3-4449-4ede-b336-33bb3d816de8",
-  "crmOrigin": null,
-  "backendOrigin": null,
-  "databaseName": null,
-  "databaseIdentity": null,
-  "fixtureSourceKey": null,
-  "reviewers": []
+  "crmOrigin": "https://emerson-crm.netlify.app",
+  "backendOrigin": "https://epdg-practice-api-synthetic-hosted.up.railway.app",
+  "databaseName": "netlifydb",
+  "databaseIdentity": "d3ddee8d-047a-456d-9c3d-a7dca7234329",
+  "fixtureSourceKey": "epdg-hosted-synthetic:2026-10-27:d3ddee8d-047a-456d-9c3d-a7dca7234329",
+  "reviewers": [
+    {
+      "memberIdSha256": "d6ea5f48b90876b6f6ab1e50783c119dfb449b61ffebd9ea767626a65fc9c5b6",
+      "identitySha256": "6f4f246f62900b833ed523281ee31838a6fc58760534dcaad3540b4d51e366d1"
+    }
+  ]
 }

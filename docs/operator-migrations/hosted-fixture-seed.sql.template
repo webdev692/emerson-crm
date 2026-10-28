@@ -1,36 +1,46 @@
 -- REVIEW TEMPLATE ONLY: outside auto-applied migrations, deliberately disabled.
--- Root must verify provider/site/production DB, current Identity+membership and
+-- Root must verify provider/site/production DB, existing owner membership and
 -- compiled profile bytes, fill all pins, then make a new reviewed DML migration.
+-- Current invited/confirmed Identity is reverified before any decision.
 -- No staff/account/role, approval, decision, outbox or receiver state is seeded.
 DO $seed$
 DECLARE
   approved boolean := false;
-  profile_and_current_identity_verified boolean := false;
+  target_and_existing_membership_verified boolean := false;
   compiled_profile_sha256 text := NULL;
   database_identity uuid := NULL;
   crm_origin text := NULL;
   backend_origin text := NULL;
   fixture_source_key text := NULL;
-  -- Existing historical owner; current server Identity and DB membership must
-  -- both be reverified before enabling this template. This creates no member.
-  existing_reviewer uuid := '90000000-0000-4000-8000-000000000010';
+  -- Commitments to an existing owner, never a public account UUID or address.
+  -- Current server Identity and membership must both be verified separately.
+  reviewer_id_sha256 text := NULL;
+  reviewer_identity_sha256 text := NULL;
+  existing_reviewer uuid;
+  reviewer_matches integer;
   source_fingerprint text := encode(sha256(convert_to(
     '{"source":"SYNTHETIC hosted education fixture","row":"fictional-learner-b","version":"hosted-fixture-v1"}',
     'UTF8')), 'hex');
 BEGIN
   PERFORM pg_advisory_xact_lock(7031926);
-  IF NOT approved OR NOT profile_and_current_identity_verified
+  IF NOT approved OR NOT target_and_existing_membership_verified
      OR current_database()<>'netlifydb'
      OR compiled_profile_sha256 IS NULL OR compiled_profile_sha256 !~ '^[0-9a-f]{64}$'
      OR database_identity IS NULL OR crm_origin IS NULL OR backend_origin IS NULL
      OR fixture_source_key IS NULL
+     OR reviewer_id_sha256 IS NULL OR reviewer_id_sha256 !~ '^[0-9a-f]{64}$'
+     OR reviewer_identity_sha256 IS NULL OR reviewer_identity_sha256 !~ '^[0-9a-f]{64}$'
      OR crm_origin !~ '^https://[a-z0-9.-]+$' OR backend_origin !~ '^https://[a-z0-9.-]+$'
      OR crm_origin=backend_origin
      OR fixture_source_key !~ '^epdg-hosted-synthetic:[A-Za-z0-9:_-]{1,120}$' THEN
     RAISE EXCEPTION 'Disabled template: exact verified hosted profile and database required' USING ERRCODE='55000';
   END IF;
-  IF NOT EXISTS(SELECT 1 FROM public.crm_members m WHERE m.id=existing_reviewer
-      AND m.active AND m.role='owner' AND m.email='owner@emerson.example') THEN
+  SELECT count(*)::integer,min(m.id::text)::uuid INTO reviewer_matches,existing_reviewer
+    FROM public.crm_members m WHERE m.active AND m.role='owner'
+      AND m.email=btrim(m.email) AND m.email !~* '\.invalid$'
+      AND encode(sha256(convert_to(m.id::text,'UTF8')),'hex')=reviewer_id_sha256
+      AND encode(sha256(convert_to(m.id::text||'|'||lower(m.email),'UTF8')),'hex')=reviewer_identity_sha256;
+  IF reviewer_matches<>1 OR existing_reviewer IS NULL THEN
     RAISE EXCEPTION 'Existing current verified owner membership required; no grants are performed' USING ERRCODE='55000';
   END IF;
   IF EXISTS(SELECT 1 FROM public.crm_records WHERE id IN (

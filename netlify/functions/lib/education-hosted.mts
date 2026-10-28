@@ -37,8 +37,8 @@ export interface HostedEducationProfile {
   readonly databaseIdentity: string
   readonly fixtureSourceKey: string
   readonly reviewers: readonly {
-    readonly memberId: string
-    readonly email: string
+    readonly memberIdSha256: string
+    readonly identitySha256: string
   }[]
 }
 export type HostedDecisionBody = Omit<EducationDecisionBody, 'environment'> & {
@@ -67,6 +67,32 @@ const profileFields = [
   'reviewers',
 ]
 const email = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
+const sha256 = /^[0-9a-f]{64}$/
+// Public source commits to exact identities without publishing an account UUID
+// or address. These are allowlist commitments, never authentication credentials.
+export function hostedReviewerIdSha256(memberId: string): string {
+  protocolCheck(
+    isProtocolUuid(memberId) && memberId === memberId.toLowerCase(),
+    'Invalid hosted reviewer UUID',
+  )
+  return createHash('sha256').update(memberId, 'utf8').digest('hex')
+}
+export function hostedReviewerIdentitySha256(
+  memberId: string,
+  address: string,
+): string {
+  hostedReviewerIdSha256(memberId)
+  protocolCheck(
+    typeof address === 'string' &&
+      address === address.trim() &&
+      email.test(address) &&
+      !address.toLowerCase().endsWith('.invalid'),
+    'Invalid hosted reviewer address',
+  )
+  return createHash('sha256')
+    .update(`${memberId}|${address.toLowerCase()}`, 'utf8')
+    .digest('hex')
+}
 function origin(value: unknown): value is string {
   if (typeof value !== 'string') return false
   try {
@@ -113,20 +139,26 @@ export function parseHostedEducationProfile(
     'Hosted education profile is unconfigured',
   )
   const reviewers = profile.reviewers.map((item) => {
-    const r = exactObject(item, ['memberId', 'email'], 'hosted reviewer')
+    const r = exactObject(
+      item,
+      ['memberIdSha256', 'identitySha256'],
+      'hosted reviewer commitment',
+    )
     protocolCheck(
-      isProtocolUuid(r.memberId) &&
-        typeof r.email === 'string' &&
-        r.email === r.email.toLowerCase().trim() &&
-        email.test(r.email) &&
-        !r.email.endsWith('.invalid'),
+      typeof r.memberIdSha256 === 'string' &&
+        sha256.test(r.memberIdSha256) &&
+        typeof r.identitySha256 === 'string' &&
+        sha256.test(r.identitySha256),
       'Invalid hosted reviewer binding',
     )
-    return Object.freeze({ memberId: r.memberId, email: r.email })
+    return Object.freeze({
+      memberIdSha256: r.memberIdSha256,
+      identitySha256: r.identitySha256,
+    })
   })
   protocolCheck(
-    new Set(reviewers.map((r) => r.memberId)).size === reviewers.length &&
-      new Set(reviewers.map((r) => r.email)).size === reviewers.length,
+    new Set(reviewers.map((r) => r.memberIdSha256)).size === reviewers.length &&
+      new Set(reviewers.map((r) => r.identitySha256)).size === reviewers.length,
     'Duplicate hosted reviewer binding',
   )
   return Object.freeze({
@@ -178,14 +210,23 @@ export function hostedReviewerAllowed(
   profile: HostedEducationProfile,
   member: EducationMember | undefined,
 ): boolean {
-  return (
-    !!member?.active &&
-    member.role !== 'viewer' &&
-    (member.role === 'owner' || member.hr === true) &&
-    profile.reviewers.some(
-      (r) => r.memberId === member.id && r.email === member.email.toLowerCase(),
-    )
+  if (
+    !member?.active ||
+    member.role === 'viewer' ||
+    (member.role !== 'owner' && member.hr !== true)
   )
+    return false
+  try {
+    const memberIdSha256 = hostedReviewerIdSha256(member.id)
+    const identitySha256 = hostedReviewerIdentitySha256(member.id, member.email)
+    return profile.reviewers.some(
+      (r) =>
+        r.memberIdSha256 === memberIdSha256 &&
+        r.identitySha256 === identitySha256,
+    )
+  } catch {
+    return false
+  }
 }
 export function hostedSigningKey(read: ReadEnvironment): string {
   const encoded = read('EPDG_HOSTED_PRACTICE_HANDOFF_KEY')
