@@ -3,6 +3,7 @@
 // control substitutes only explicit fictional reviewer commitments in a fresh
 // loopback netlifydb; it never creates an actual Identity account or role grant.
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
@@ -10,6 +11,7 @@ import { createLocalPostgres, type LocalPgPool } from '../test/local-postgres'
 import {
   hostedSeedMigration,
   rehearsalMigrationPlan,
+  reviewedOperatorDmlMigrations,
 } from '../test/rehearsal-migrations'
 import {
   hostedReviewerIdSha256,
@@ -84,7 +86,23 @@ describe.skipIf(!enabled)(
         new URL('../../netlify/database/migrations', import.meta.url),
       )
       const plan = await rehearsalMigrationPlan(root)
-      expect(plan.deferredOperatorDml).toEqual([hostedSeedMigration])
+      expect(plan.deferredOperatorDml).toEqual(
+        [...reviewedOperatorDmlMigrations].sort((a, b) =>
+          a.migration.localeCompare(b.migration),
+        ),
+      )
+      for (const entry of plan.operatorDmlSql) {
+        const bytes = await readFile(`${root}/${entry.path}`)
+        expect(createHash('sha256').update(bytes).digest('hex')).toBe(
+          entry.sha256,
+        )
+        expect(entry.sql).toBe(bytes.toString('utf8'))
+      }
+      expect(
+        plan.operatorDmlSql.find(
+          (entry) => entry.migration === hostedSeedMigration.migration,
+        ),
+      ).toEqual({ ...hostedSeedMigration, sql: plan.seedSql })
       for (const migration of plan.schemaMigrations) {
         const sql = await readFile(`${root}/${migration}/migration.sql`, 'utf8')
         await pool.query(`BEGIN;\n${sql}\nCOMMIT;`)
