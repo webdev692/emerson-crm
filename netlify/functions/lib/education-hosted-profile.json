@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "enabled": false,
+  "enabled": true,
   "environment": "synthetic-hosted",
   "siteId": "c83673f3-4449-4ede-b336-33bb3d816de8",
   "crmOrigin": "https://emerson-crm.netlify.app",
