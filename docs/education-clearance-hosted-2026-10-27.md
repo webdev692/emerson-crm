@@ -1,8 +1,10 @@
 # Hosted synthetic CRM education bridge candidate
 
-This source candidate is separate from the existing loopback rehearsal. Its
-compiled profile is disabled and unconfigured. No hosted database/configuration,
-staff access, account, message or deployment was changed by this implementation.
+This hosted synthetic bridge is separate from the existing loopback rehearsal.
+The October 28 enablement candidate changes only the compiled enable boolean;
+its target, reviewer commitments and immutable seed snapshot remain pinned.
+The deployment and acceptance checkpoints below distinguish preparation from
+the live owner verification and signed handoff tests that still must pass.
 
 ## Authorization and data boundary
 
@@ -237,3 +239,44 @@ Production seed promotion remains held until the actual new API and synthetic
 learning flow pass acceptance. Profile enablement, a real fresh receiver
 observation and explicit signed decisions are subsequent steps. This preview
 does not import Workspace data, grant access, activate a learner or send email.
+
+## October 28 production seed and guarded enablement candidate
+
+The isolated preview subsequently passed its exact-source native build, private
+owner HR application load and read-only seed postflight. The repaired Supabase
+receiver at source `62f0b09dbf74f0650005ee61de88e7d6cf7b5db2` passed the nine
+initial learning checks and six guarded continuation checks, preserving its
+existing mentor draft. Recovery, fixture restoration and independent source
+review also passed. These results allowed the already authorized disabled seed
+release to proceed.
+
+Production deployment `6ae25841945d1dc981bcc5ae` published source
+`e1456fcf5fcf7aa90d0084576ca582a9ea932f32` at 20:17:43 UTC. The platform reports
+the exact eighth seed migration applied. Read-only operator queries confirmed
+12 records, the same one active commercial owner, four synthetic HR fixtures,
+and no decisions, outbox entries or local checkpoints. The limited-operator
+postflight also verified all four exact fixture bindings and audit rows, the
+immutable snapshot hash, all five enabled guard bindings, and absence of browser
+grants. The supplied role was confirmed as `netlifydb_readonly`.
+
+The operator connection is subject to row security on the hosted identity and
+observation tables. Its zero visible rows do not establish that those tables
+are empty. Netlify documents read-only production connection access for Developer
+roles, unlike other branches. Preserve that boundary; do not replay the seed,
+change grants or disable RLS to make an operator query pass. Full production
+metadata acceptance still requires the normal owner application server path.
+
+This candidate enables only the compiled boolean. Every other runtime pin,
+the immutable disabled-profile snapshot, and all eight migration files remain
+unchanged. Before any receiver capture or decision, verify the existing owner
+session against the deployed profile. The normal `education-status` path checks
+the exact marker and database guards, current invited/confirmed Identity, HR
+authority and fixed source binding before requiring an initial observation.
+Its expected missing-fresh-checkpoint response therefore verifies those prior
+guards without recording a decision. A different error keeps the release held.
+
+Local enablement validation passed typecheck, 201 ordinary tests, lint with zero
+errors or warnings, and build; 103 opt-in SQL skips are reported separately.
+These checks do not replace the pending production server verification, actual
+fresh observation or signed roundtrip. Real Workspace imports, real learner
+activation, external mail and privileged portal controls remain held.

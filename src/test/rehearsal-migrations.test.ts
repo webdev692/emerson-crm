@@ -1,7 +1,14 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -55,6 +62,41 @@ async function profileInputs() {
   return { bytes, runtime }
 }
 describe('exact reviewed operator DML deferral for disposable SQL fixtures', () => {
+  it('checks every production-default registry entry against its exact real migration bytes', async () => {
+    const root = fileURLToPath(
+      new URL('../../netlify/database/migrations', import.meta.url),
+    )
+    const registered = [...reviewedOperatorDmlMigrations].sort((a, b) =>
+      a.migration.localeCompare(b.migration),
+    )
+    const plan = await rehearsalMigrationPlan(root)
+    expect(plan.deferredOperatorDml).toEqual(registered)
+    expect(plan.operatorDmlSql).toHaveLength(registered.length)
+    for (const entry of registered) {
+      const bytes = await readFile(join(root, entry.path))
+      expect(createHash('sha256').update(bytes).digest('hex')).toBe(
+        entry.sha256,
+      )
+      expect(
+        plan.operatorDmlSql.find((item) => item.migration === entry.migration),
+      ).toEqual({ ...entry, sql: bytes.toString('utf8') })
+    }
+    const migrationNames = (await readdir(root, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort()
+    expect(plan.schemaMigrations).toEqual(
+      migrationNames.filter(
+        (name) => !registered.some((entry) => entry.migration === name),
+      ),
+    )
+    expect(registered.filter((entry) => entry.type === 'seed')).toEqual([
+      hostedSeedMigration,
+    ])
+    expect(plan.seedSql).toBe(
+      (await readFile(join(root, hostedSeedMigration.path))).toString('utf8'),
+    )
+  })
   it('defers only the one exact reviewed seed and applies all other migration names', async () => {
     const { root, seed } = await fixture()
     const ordinary = [
@@ -62,7 +104,7 @@ describe('exact reviewed operator DML deferral for disposable SQL fixtures', () 
       '20260102000000_other_hosted_seed',
     ]
     for (const name of ordinary) await mkdir(join(root, name))
-    const plan = await rehearsalMigrationPlan(root)
+    const plan = await rehearsalMigrationPlan(root, [hostedSeedMigration])
     expect(plan.schemaMigrations).toEqual(ordinary)
     expect(plan.deferredOperatorDml).toEqual([hostedSeedMigration])
     expect(plan.seedSql).toBe(seed.toString('utf8'))
@@ -81,9 +123,13 @@ describe('exact reviewed operator DML deferral for disposable SQL fixtures', () 
       join(root, hostedSeedMigration.path),
       Buffer.concat([seed, Buffer.from('\n')]),
     )
-    await expect(rehearsalMigrationPlan(root)).rejects.toThrow('hash drift')
+    await expect(
+      rehearsalMigrationPlan(root, [hostedSeedMigration]),
+    ).rejects.toThrow('hash drift')
     await rm(join(root, hostedSeedMigration.migration), { recursive: true })
-    await expect(rehearsalMigrationPlan(root)).rejects.toThrow('missing')
+    await expect(
+      rehearsalMigrationPlan(root, [hostedSeedMigration]),
+    ).rejects.toThrow('missing')
   })
   it('permits only a boolean enabled transition while preserving immutable seed audit bytes and every other profile pin', async () => {
     const { seed } = await fixture()
@@ -157,7 +203,7 @@ describe('exact reviewed operator DML deferral for disposable SQL fixtures', () 
     await writeFile(join(root, entry.path), fixtureSql)
     const unrelated = '20000102000000_fixture_observation_unregistered'
     await mkdir(join(root, unrelated))
-    const registry = [...reviewedOperatorDmlMigrations, entry]
+    const registry = [hostedSeedMigration, entry]
     const plan = await rehearsalMigrationPlan(root, registry)
     expect(plan.schemaMigrations).toEqual([unrelated])
     expect(plan.deferredOperatorDml).toEqual([entry, hostedSeedMigration])
@@ -194,6 +240,5 @@ describe('exact reviewed operator DML deferral for disposable SQL fixtures', () 
       await expect(rehearsalMigrationPlan(root, registry)).rejects.toThrow(
         'Invalid exact',
       )
-    expect(reviewedOperatorDmlMigrations).toEqual([hostedSeedMigration])
   })
 })
