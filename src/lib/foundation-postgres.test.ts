@@ -13,7 +13,7 @@ import {
 } from 'vitest'
 import { execFile, spawn } from 'node:child_process'
 import { createHash, randomInt, randomUUID } from 'node:crypto'
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { createServer } from 'node:net'
 import { dirname, join, resolve } from 'node:path'
@@ -24,6 +24,7 @@ import { eq } from 'drizzle-orm'
 import * as schema from '../../db/schema'
 import type { RecordData, RecordEnvelope } from './crm-types'
 import { calendarDefault } from './rules'
+import { rehearsalMigrationPlan } from '../test/rehearsal-migrations'
 
 type FixtureRecord = typeof schema.records.$inferSelect
 interface PgPool {
@@ -391,10 +392,8 @@ describe.skipIf(!enabled)(
         dirname(fileURLToPath(import.meta.url)),
         '../../netlify/database/migrations',
       )
-      migrations = (await readdir(migrationRoot, { withFileTypes: true }))
-        .filter((d) => d.isDirectory())
-        .map((d) => d.name)
-        .sort()
+      const plan = await rehearsalMigrationPlan(migrationRoot)
+      migrations = plan.schemaMigrations
       for (const migration of migrations) {
         const sql = await readFile(
           join(migrationRoot, migration, 'migration.sql'),
@@ -434,6 +433,7 @@ describe.skipIf(!enabled)(
             hostedConnections: false,
             syntheticAddressesOnly: true,
             migrations,
+            deferredOperatorDml: plan.deferredOperatorDml,
             adapter:
               'drizzle-orm/node-postgres; production handler and schema; mocked Identity/database factory only',
             intakeApplyFixture:

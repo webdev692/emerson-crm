@@ -9,6 +9,8 @@ import {
   configuredHostedEducationProfile,
   hostedEducationAvailable,
   hostedReviewerAllowed,
+  hostedReviewerIdSha256,
+  hostedReviewerIdentitySha256,
   hostedSigningKey,
   parseHostedEducationProfile,
   parseHostedEducationDecision,
@@ -29,6 +31,10 @@ const https = vi.hoisted(() => ({ request: vi.fn() }))
 vi.mock('node:https', () => ({ request: https.request }))
 const now = Date.parse('2026-10-27T13:00:00.000Z')
 const key = randomBytes(32).toString('base64url')
+const reviewerFixture = {
+  id: '90000000-0000-4000-8000-000000000002',
+  email: 'reviewer@emerson.example',
+}
 const profile: HostedEducationProfile = parseHostedEducationProfile({
   version: 1,
   enabled: true,
@@ -41,8 +47,11 @@ const profile: HostedEducationProfile = parseHostedEducationProfile({
   fixtureSourceKey: 'epdg-hosted-synthetic:unit-fixture',
   reviewers: [
     {
-      memberId: '90000000-0000-4000-8000-000000000002',
-      email: 'reviewer@emerson.example',
+      memberIdSha256: hostedReviewerIdSha256(reviewerFixture.id),
+      identitySha256: hostedReviewerIdentitySha256(
+        reviewerFixture.id,
+        reviewerFixture.email,
+      ),
     },
   ],
 })
@@ -65,7 +74,7 @@ function body(): HostedDecisionBody {
     decision: 'cleared',
     issued_at: new Date(now).toISOString(),
     policy_version: 'synthetic-onboarding-v1',
-    reviewer_id: profile.reviewers[0].memberId,
+    reviewer_id: reviewerFixture.id,
     clearance: {
       identity_verified: true,
       onboarding_complete: true,
@@ -161,7 +170,7 @@ describe('separate hosted synthetic CRM handoff', () => {
       {
         reviewers: [
           {
-            memberId: profile.reviewers[0].memberId,
+            memberId: reviewerFixture.id,
             email: 'fake@staff.invalid',
           },
         ],
@@ -170,6 +179,43 @@ describe('separate hosted synthetic CRM handoff', () => {
       expect(() =>
         parseHostedEducationProfile({ ...profile, ...change }),
       ).toThrow()
+  })
+  it('commits to identities without publishing raw account pins and rejects malformed or duplicate commitments', () => {
+    const encoded = JSON.stringify(profile)
+    expect(encoded).not.toContain(reviewerFixture.id)
+    expect(encoded).not.toContain(reviewerFixture.email)
+    expect(profile.reviewers[0]).toEqual({
+      memberIdSha256:
+        '209e26e91657a464d6c7022f02c59b7212fe51c2d8721b95d35cad96986356b7',
+      identitySha256:
+        'ebf9742eada246c3d03936390ea54c3a4eae06c5f5c18c275196a037e7def17b',
+    })
+    for (const reviewers of [
+      [{ memberId: reviewerFixture.id, email: reviewerFixture.email }],
+      [{ ...profile.reviewers[0], memberIdSha256: 'A'.repeat(64) }],
+      [{ ...profile.reviewers[0], identitySha256: 'a'.repeat(63) }],
+      [{ ...profile.reviewers[0], email: reviewerFixture.email }],
+      [
+        profile.reviewers[0],
+        { ...profile.reviewers[0], identitySha256: 'a'.repeat(64) },
+      ],
+      [
+        profile.reviewers[0],
+        { ...profile.reviewers[0], memberIdSha256: 'a'.repeat(64) },
+      ],
+    ])
+      expect(() =>
+        parseHostedEducationProfile({ ...profile, reviewers }),
+      ).toThrow()
+    expect(() =>
+      hostedReviewerIdSha256('AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA'),
+    ).toThrow()
+    expect(() =>
+      hostedReviewerIdentitySha256(
+        reviewerFixture.id,
+        'fictional@staff.invalid',
+      ),
+    ).toThrow()
   })
   it('requires real platform context and cannot be enabled through a URL or runtime flags alone', () => {
     const req = new Request(profile.crmOrigin + '/api/crm')
@@ -214,8 +260,8 @@ describe('separate hosted synthetic CRM handoff', () => {
   })
   it('matches current exact staff identity and HR authority without creating or granting membership', () => {
     const member = {
-      id: profile.reviewers[0].memberId,
-      email: profile.reviewers[0].email,
+      id: reviewerFixture.id,
+      email: reviewerFixture.email,
       name: 'Test reviewer',
       role: 'manager',
       active: true,
@@ -224,9 +270,17 @@ describe('separate hosted synthetic CRM handoff', () => {
       createdAt: new Date(now),
     } as EducationMember
     expect(hostedReviewerAllowed(profile, member)).toBe(true)
+    expect(
+      hostedReviewerAllowed(profile, {
+        ...member,
+        email: reviewerFixture.email.toUpperCase(),
+      }),
+    ).toBe(true)
     for (const change of [
       { id: randomUUID() },
       { email: 'other@emerson.example' },
+      { email: 'fictional@staff.invalid' },
+      { email: ` ${reviewerFixture.email}` },
       { role: 'viewer' },
       { active: false },
       { hr: false },
@@ -235,6 +289,19 @@ describe('separate hosted synthetic CRM handoff', () => {
         false,
       )
     expect(hostedReviewerAllowed(profile, undefined)).toBe(false)
+    for (const change of [
+      { memberIdSha256: 'a'.repeat(64) },
+      { identitySha256: 'a'.repeat(64) },
+    ])
+      expect(
+        hostedReviewerAllowed(
+          parseHostedEducationProfile({
+            ...profile,
+            reviewers: [{ ...profile.reviewers[0], ...change }],
+          }),
+          member,
+        ),
+      ).toBe(false)
   })
   it('exports only canonical fixed fictional decisions with the hosted environment', () => {
     const value = body(),

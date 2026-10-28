@@ -23,6 +23,16 @@ const context = vi.hoisted(() => ({
   db: null as NodePgDatabase<typeof schema> | null,
   environment: {} as Record<string, string | undefined>,
   identities: {} as Record<string, boolean>,
+  reviewerIdentities: [
+    {
+      memberId: '90000000-0000-4000-8000-000000000002',
+      email: 'reviewer@emerson.example',
+    },
+    {
+      memberId: '90000000-0000-4000-8000-000000000003',
+      email: 'second@emerson.example',
+    },
+  ],
   profile: {
     version: 1,
     enabled: true,
@@ -35,12 +45,16 @@ const context = vi.hoisted(() => ({
     fixtureSourceKey: 'epdg-hosted-synthetic:sql-fixture',
     reviewers: [
       {
-        memberId: '90000000-0000-4000-8000-000000000002',
-        email: 'reviewer@emerson.example',
+        memberIdSha256:
+          '209e26e91657a464d6c7022f02c59b7212fe51c2d8721b95d35cad96986356b7',
+        identitySha256:
+          'ebf9742eada246c3d03936390ea54c3a4eae06c5f5c18c275196a037e7def17b',
       },
       {
-        memberId: '90000000-0000-4000-8000-000000000003',
-        email: 'second@emerson.example',
+        memberIdSha256:
+          '2a81eccdac2548a42e41b8ae02d0619fc7fa6663c3e6d641c1707b71e141aaf1',
+        identitySha256:
+          'c07cc18646044a5ec2a033eab9167fc3aa3694496070ff618703e14baae1aaad',
       },
     ],
   },
@@ -49,7 +63,7 @@ vi.mock('@netlify/identity', () => ({
   getUser: async () => context.user,
   admin: {
     getUser: async (id: string) => {
-      const reviewer = context.profile.reviewers.find((r) => r.memberId === id)
+      const reviewer = context.reviewerIdentities.find((r) => r.memberId === id)
       if (!reviewer || !context.identities[id])
         throw new Error('Current identity unavailable')
       return {
@@ -72,7 +86,11 @@ vi.mock('../../netlify/functions/lib/education-hosted-profile.json', () => ({
 }))
 import handler from '../../netlify/functions/crm.mts'
 import { createHostedEducationPolicy } from '../../netlify/functions/lib/education-hosted-policy.mts'
-import { parseHostedEducationProfile } from '../../netlify/functions/lib/education-hosted.mts'
+import {
+  hostedReviewerIdSha256,
+  hostedReviewerIdentitySha256,
+  parseHostedEducationProfile,
+} from '../../netlify/functions/lib/education-hosted.mts'
 import {
   dispatchEducation,
   getEducationStatus,
@@ -515,6 +533,23 @@ describe.skipIf(!enabled)(
       s = await state()
       expect((s.current as Record<string, unknown>).reviewerId).toBe(ids.second)
     })
+    it('lets another current HR reviewer hold and revoke after the previous reviewer email changes', async () => {
+      expect((await review()).status).toBe(200)
+      await db()
+        .update(schema.members)
+        .set({ email: 'changed-reviewer@emerson.example' })
+        .where(eq(schema.members.id, ids.actor))
+      context.user = { id: ids.second }
+      const s = await state()
+      expect((s.current as Record<string, unknown>).decision).toBe('held')
+      expect((s.current as Record<string, unknown>).reason).toContain(
+        'reviewer_authority_changed',
+      )
+      expect((await review({ decision: 'revoked' })).status).toBe(200)
+      const current = (await state()).current as Record<string, unknown>
+      expect(current.decision).toBe('revoked')
+      expect(current.reviewerId).toBe(ids.second)
+    })
     it('records only validated hosted acknowledgements and preserves failed retry bytes', async () => {
       expect((await review()).status).toBe(200)
       const [original] = await db().select().from(schema.educationOutbox)
@@ -759,11 +794,12 @@ describe.skipIf(!enabled)(
         .update(schema.members)
         .set({ role: 'owner' })
         .where(eq(schema.members.id, ids.actor))
+      const membersBeforeSeed = await db().select().from(schema.members)
       const configuredSeed = seed
         .replace('approved boolean := false', 'approved boolean := true')
         .replace(
-          'profile_and_current_identity_verified boolean := false',
-          'profile_and_current_identity_verified boolean := true',
+          'target_and_existing_membership_verified boolean := false',
+          'target_and_existing_membership_verified boolean := true',
         )
         .replace(
           'compiled_profile_sha256 text := NULL',
@@ -786,14 +822,36 @@ describe.skipIf(!enabled)(
           `fixture_source_key text := '${context.profile.fixtureSourceKey}'`,
         )
         .replaceAll('netlifydb', 'postgres')
-        .replaceAll('90000000-0000-4000-8000-000000000010', ids.actor)
-        .replaceAll('owner@emerson.example', 'reviewer@emerson.example')
+        .replace(
+          'reviewer_id_sha256 text := NULL',
+          `reviewer_id_sha256 text := '${hostedReviewerIdSha256(ids.actor)}'`,
+        )
+        .replace(
+          'reviewer_identity_sha256 text := NULL',
+          `reviewer_identity_sha256 text := '${hostedReviewerIdentitySha256(ids.actor, 'reviewer@emerson.example')}'`,
+        )
         // This isolated test profile contains two existing fictional reviewers.
         .replace(
           'jsonb_build_array(existing_reviewer::text)',
           `jsonb_build_array(existing_reviewer::text,'${ids.second}')`,
         )
+      await expect(
+        cluster.pool.query(
+          configuredSeed.replace(
+            hostedReviewerIdentitySha256(ids.actor, 'reviewer@emerson.example'),
+            'b'.repeat(64),
+          ),
+        ),
+      ).rejects.toMatchObject({ code: '55000' })
+      expect(await db().select().from(schema.records)).toHaveLength(0)
+      expect(
+        await db().select().from(schema.educationHostedIdentity),
+      ).toHaveLength(0)
       await cluster.pool.query(configuredSeed)
+      const membersAfterSeed = await db().select().from(schema.members)
+      expect(membersAfterSeed.sort((a, b) => a.id.localeCompare(b.id))).toEqual(
+        membersBeforeSeed.sort((a, b) => a.id.localeCompare(b.id)),
+      )
       expect(await db().select().from(schema.educationDecisions)).toHaveLength(
         0,
       )
