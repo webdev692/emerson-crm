@@ -212,3 +212,28 @@ factory. They do not establish hosted Identity/database/deployment acceptance.
 The production round trip, configured migration application, operator confirmation,
 current hosted function packaging and published-artifact/browser checks remain
 root release work. Owner/admin controls and real HR activation remain closed.
+
+## October 28 isolated disabled-seed preview
+
+The integrated source at `404feba7bd36ca560a200b736767151748d28942` passed
+GitHub quality run `40745960820`, 198 ordinary and 102 fresh SQL checks, followed
+by 14 focused lifecycle unit and 26 focused SQL checks. The seven applied
+migrations, published intake implementation and original local checkout were
+preserved. The compiled education profile remains disabled.
+
+The separately reviewed EPDG bootstrap at source
+`f5f493d46ad151cf4ac8de67a95477c382110a04` completed its actual restricted
+Supabase/TLS/managed-schema checks on October 28. This establishes bootstrap
+preparation; it does not establish a running Supabase-backed API, receiver
+acceptance or an HR decision window.
+
+The next native Git preview may apply the exact forward seed only to the
+isolated `codex/hosted-education-alignment-20261028` database branch. Verify its
+four fixed HR fixtures, existing owner, immutable marker, audit provenance and
+eight migrations while the profile is disabled. Independently verify production
+still has its seven migrations and no education marker or fixture.
+
+Production seed promotion remains held until the actual new API and synthetic
+learning flow pass acceptance. Profile enablement, a real fresh receiver
+observation and explicit signed decisions are subsequent steps. This preview
+does not import Workspace data, grant access, activate a learner or send email.
