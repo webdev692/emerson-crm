@@ -203,6 +203,7 @@ export function Workspace() {
     [records, setRecords] = useState<Rec[]>([]),
     [member, setMember] = useState<FoundationMember | null>(null),
     [syntheticEducation, setSyntheticEducation] = useState(false),
+    [syntheticWebsiteIntake, setSyntheticWebsiteIntake] = useState(false),
     [staff, setStaff] = useState<FoundationMember[]>([]),
     [signed, setSigned] = useState(false),
     [loading, setLoading] = useState(true),
@@ -228,6 +229,7 @@ export function Workspace() {
     )
     setRecords([])
     setSyntheticEducation(false)
+    setSyntheticWebsiteIntake(false)
     setStaff([])
     setSelected(null)
     setModal((current) =>
@@ -258,6 +260,7 @@ export function Workspace() {
         setAccess('ready')
         setMember(d.member)
         setSyntheticEducation(d.syntheticEducation === true)
+        setSyntheticWebsiteIntake(d.syntheticWebsiteIntake === true)
         setRecords(d.records)
         setStaff(d.staff)
         const calendarSetting = d.settings.find(
@@ -781,6 +784,7 @@ export function Workspace() {
               api={api}
               reload={reload}
               syntheticEducation={syntheticEducation}
+              syntheticWebsiteIntake={syntheticWebsiteIntake}
               onOpenLegacy={() => go('Opportunities')}
             />
           ) : page === 'Dashboard' ? (

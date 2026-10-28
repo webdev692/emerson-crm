@@ -52,6 +52,7 @@ type Props = {
   reload: () => Promise<unknown>
   onOpenLegacy?: (kind: string) => void
   syntheticEducation?: boolean
+  syntheticWebsiteIntake?: boolean
 }
 type Draft = {
   kind: string
@@ -1403,12 +1404,14 @@ function ImportReview({
   api,
   reload,
   onNotice,
+  syntheticWebsiteIntake,
 }: Props & { onNotice: (text: string) => void }) {
   const [showUpload, setShowUpload] = useState(false)
   const [selected, setSelected] = useState<FoundationRecord | null>(null)
   const [filter, setFilter] = useState('All')
   const rows = records.filter((r) => r.kind === 'intake')
   const canReview = ['owner', 'manager'].includes(member.role)
+  const [pulling, setPulling] = useState(false)
   return (
     <>
       <Intro
@@ -1417,6 +1420,38 @@ function ImportReview({
         text="Map a small CSV batch into a protected review queue. Every row needs a deliberate decision; uploads do not create contacts, enroll applicants or send messages."
       />
       <div className="foundation-toolbar">
+        {canReview && syntheticWebsiteIntake && (
+          <button
+            type="button"
+            disabled={pulling}
+            onClick={async () => {
+              setPulling(true)
+              try {
+                const result = (await api({
+                  action: 'website-intake-pull',
+                })) as {
+                  queued: number
+                  acknowledged: number
+                  retryRequired?: boolean
+                }
+                onNotice(
+                  `${result.queued} synthetic website inquiries queued. ${result.acknowledged} acknowledged.${result.retryRequired ? ' Retry the fetch to finish acknowledgment safely.' : ''} No contacts or applicants created.`,
+                )
+                await reload()
+              } catch {
+                onNotice(
+                  'Synthetic website intake is unavailable. No source acknowledgment was confirmed.',
+                )
+              } finally {
+                setPulling(false)
+              }
+            }}
+          >
+            {pulling
+              ? 'Fetching synthetic inquiries…'
+              : 'Fetch synthetic website inquiries'}
+          </button>
+        )}
         <label className="foundation-field">
           <span>Queue status</span>
           <select value={filter} onChange={(e) => setFilter(e.target.value)}>
