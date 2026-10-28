@@ -24,6 +24,10 @@ import {
 } from './lib/education-hosted.mts'
 import { createHostedEducationPolicy } from './lib/education-hosted-policy.mts'
 import {
+  pullWebsiteIntake,
+  websiteIntakeAvailable,
+} from './lib/website-intake.mts'
+import {
   createFoundationRead,
   createFoundationScope,
   handleFoundation,
@@ -212,6 +216,11 @@ export default async function (req: Request, context?: Context) {
       return Response.json(
         {
           member: actor,
+          syntheticWebsiteIntake: websiteIntakeAvailable(
+            req,
+            readEnvironment,
+            context?.deploy,
+          ),
           syntheticEducation: educationAvailable,
           ...(educationAvailable
             ? {
@@ -238,6 +247,22 @@ export default async function (req: Request, context?: Context) {
     }
     need(req.method === 'POST', 'Method not supported')
     const body = await req.json()
+    if (body.action === 'website-intake-pull') {
+      need(
+        Object.keys(body).length === 1,
+        'Only the intake action is accepted.',
+      )
+      need(
+        websiteIntakeAvailable(req, readEnvironment, context?.deploy),
+        'Synthetic website intake unavailable.',
+      )
+      const result = await pullWebsiteIntake(
+        db,
+        actor,
+        readEnvironment('CRM_WEBSITE_INTAKE_HMAC_KEY') || '',
+      )
+      return Response.json(result, { headers: { 'Cache-Control': 'no-store' } })
+    }
     need(JSON.stringify(body).length < 500000, 'Request too large')
     if (
       typeof body.action === 'string' &&
