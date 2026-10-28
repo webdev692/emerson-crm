@@ -1,0 +1,39 @@
+-- REVIEW TEMPLATE ONLY: outside auto-applied migrations, deliberately disabled.
+-- Capture the actual pinned receiver's canonical current state first. Store its
+-- UTC observation time, exact version, SHA256 and private evidence source below.
+-- Never substitute deployment time/now(), a guessed empty state or future time.
+-- For expiry before the first decision, capture again and append a NEW reviewed
+-- migration/observation; never edit an already-applied migration or retained row.
+DO $observe$
+DECLARE
+  approved boolean := false;
+  receiver_and_compiled_profile_verified boolean := false;
+  database_identity uuid := NULL;
+  p_backend_origin text := NULL;
+  actual_receiver_version integer := NULL;
+  actual_observed_at timestamptz := NULL;
+  actual_state_sha256 text := NULL;
+  actual_evidence_source text := NULL;
+BEGIN
+  PERFORM pg_advisory_xact_lock(7031926);
+  IF NOT approved OR NOT receiver_and_compiled_profile_verified
+     OR current_database()<>'netlifydb' OR database_identity IS NULL OR p_backend_origin IS NULL
+     OR actual_receiver_version IS NULL OR actual_observed_at IS NULL
+     OR actual_state_sha256 IS NULL OR actual_evidence_source IS NULL
+     OR actual_receiver_version NOT BETWEEN 0 AND 1000000
+     OR actual_observed_at<clock_timestamp()-INTERVAL '5 minutes'
+     OR actual_observed_at>clock_timestamp()
+     OR actual_state_sha256 !~ '^[0-9a-f]{64}$'
+     OR actual_evidence_source !~ '^operator-receiver-observation:[A-Za-z0-9:_-]{1,120}$'
+     OR NOT EXISTS(SELECT 1 FROM public.crm_education_hosted_identity i
+       WHERE i.id=database_identity AND i.database_name='netlifydb' AND i.synthetic_only
+         AND i.site_id='c83673f3-4449-4ede-b336-33bb3d816de8' AND i.backend_origin=p_backend_origin) THEN
+    RAISE EXCEPTION 'Disabled template: fresh actual pinned receiver evidence required' USING ERRCODE='55000';
+  END IF;
+  INSERT INTO public.crm_education_hosted_observations(identity_id,application_id,
+    receiver_version,target,observed_at,state_hash,source,evidence_source) VALUES
+    (database_identity,'82000000-0000-4000-8000-000000000001',actual_receiver_version,
+      p_backend_origin||'/internal/crm/onboarding-handoffs',actual_observed_at,
+      actual_state_sha256,'verified-hosted-epdg',actual_evidence_source);
+END;
+$observe$;

@@ -77,4 +77,3 @@ The October 27 local CRM-to-EPDG handoff acceptance passed against the running
 synthetic receiver. See [the local acceptance and publishing gates](docs/education-handoff-acceptance-2026-10-27.md).
 This closes the local connection-test gate; hosted Identity/browser acceptance,
 real-data imports and production publication remain separate approvals.
-

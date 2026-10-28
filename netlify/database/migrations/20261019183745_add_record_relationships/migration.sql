@@ -1,0 +1,25 @@
+ALTER TABLE "crm_records" ADD CONSTRAINT "crm_records_parent_id_crm_records_id_fkey" FOREIGN KEY ("parent_id") REFERENCES "crm_records"("id");--> statement-breakpoint
+ALTER TABLE "crm_records" ADD CONSTRAINT "crm_records_organization_id_crm_records_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "crm_records"("id");
+--> statement-breakpoint
+INSERT INTO crm_records (kind,title,source_key,data) VALUES ('offer','Private group workshops','catalogue-seed:Private group workshops','{"company": "TEE", "service": "Private group workshops", "offerId": "private-group-workshops", "version": "1", "pricingModel": "pending", "price": null, "currency": "USD", "referenceRange": "$150\u2013$500; length and group size", "referenceSource": "May 2026 company pricing guide, via Todor Tomic review dated 2026-10-19", "referenceDate": "2026-05", "approvalStatus": "Draft \u2014 not approved"}'::jsonb) ON CONFLICT DO NOTHING;
+
+--> statement-breakpoint
+INSERT INTO crm_records (kind,title,source_key,data) VALUES ('offer','Individual tax-return services','catalogue-seed:Individual tax-return services','{"company": "TEA", "service": "Individual tax-return services", "offerId": "individual-tax-return-services", "version": "1", "pricingModel": "pending", "price": null, "currency": "USD", "referenceRange": "$75\u2013$125 simple; $125\u2013$175 with dependents; $175\u2013$250 multiple income sources", "referenceSource": "May 2026 company pricing guide, via Todor Tomic review dated 2026-10-19", "referenceDate": "2026-05", "approvalStatus": "Draft \u2014 not approved"}'::jsonb) ON CONFLICT DO NOTHING;
+
+--> statement-breakpoint
+INSERT INTO crm_records (kind,title,source_key,data) VALUES ('offer','State-return add-ons','catalogue-seed:State-return add-ons','{"company": "TEA", "service": "State-return add-ons", "offerId": "state-return-add-ons", "version": "1", "pricingModel": "pending", "price": null, "currency": "USD", "referenceRange": "$25\u2013$50 per state", "referenceSource": "May 2026 company pricing guide, via Todor Tomic review dated 2026-10-19", "referenceDate": "2026-05", "approvalStatus": "Draft \u2014 not approved"}'::jsonb) ON CONFLICT DO NOTHING;
+
+--> statement-breakpoint
+INSERT INTO crm_records (kind,title,source_key,data) VALUES ('offer','Monthly business support','catalogue-seed:Monthly business support','{"company": "TEA", "service": "Monthly business support", "offerId": "monthly-business-support", "version": "1", "pricingModel": "pending", "price": null, "currency": "USD", "referenceRange": "$300\u2013$750 per month", "referenceSource": "May 2026 company pricing guide, via Todor Tomic review dated 2026-10-19", "referenceDate": "2026-05", "approvalStatus": "Draft \u2014 not approved"}'::jsonb) ON CONFLICT DO NOTHING;
+
+--> statement-breakpoint
+INSERT INTO crm_records (kind,title,source_key,data) VALUES ('offer','Résumé services','catalogue-seed:Résumé services','{"company": "EPDG", "service": "R\u00e9sum\u00e9 services", "offerId": "r\u00e9sum\u00e9-services", "version": "1", "pricingModel": "pending", "price": null, "currency": "USD", "referenceRange": "$50\u2013$150 by level; executive $200+", "referenceSource": "May 2026 company pricing guide, via Todor Tomic review dated 2026-10-19", "referenceDate": "2026-05", "approvalStatus": "Draft \u2014 not approved"}'::jsonb) ON CONFLICT DO NOTHING;
+
+--> statement-breakpoint
+INSERT INTO crm_records (kind,title,source_key,data) VALUES ('offer','Monthly coaching','catalogue-seed:Monthly coaching','{"company": "EPDG", "service": "Monthly coaching", "offerId": "monthly-coaching", "version": "1", "pricingModel": "pending", "price": null, "currency": "USD", "referenceRange": "$150\u2013$300 per month", "referenceSource": "May 2026 company pricing guide, via Todor Tomic review dated 2026-10-19", "referenceDate": "2026-05", "approvalStatus": "Draft \u2014 not approved"}'::jsonb) ON CONFLICT DO NOTHING;
+
+--> statement-breakpoint
+INSERT INTO crm_records (kind,title,source_key,data) VALUES ('offer','Business Starter Kit','catalogue-seed:Business Starter Kit','{"company": "Project Studio", "service": "Business Starter Kit", "offerId": "business-starter-kit", "version": "1", "pricingModel": "pending", "price": null, "currency": "USD", "referenceRange": "Pending founder decision D3", "referenceSource": "May 2026 company pricing guide, via Todor Tomic review dated 2026-10-19", "referenceDate": "2026-05", "approvalStatus": "Draft \u2014 not approved"}'::jsonb) ON CONFLICT DO NOTHING;
+
+--> statement-breakpoint
+INSERT INTO crm_records (kind,title,source_key,data) VALUES ('offer','Operations Setup','catalogue-seed:Operations Setup','{"company": "Project Studio", "service": "Operations Setup", "offerId": "operations-setup", "version": "1", "pricingModel": "pending", "price": null, "currency": "USD", "referenceRange": "Pending founder decision D3", "referenceSource": "May 2026 company pricing guide, via Todor Tomic review dated 2026-10-19", "referenceDate": "2026-05", "approvalStatus": "Draft \u2014 not approved"}'::jsonb) ON CONFLICT DO NOTHING;

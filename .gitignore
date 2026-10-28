@@ -1,0 +1,12 @@
+node_modules
+.pnpm-store
+.DS_Store
+dist
+dist-ssr
+*.local
+.env
+.netlify
+.tanstack
+
+# Generated before tests/type checking and by the Vite route plugin
+src/routeTree.gen.ts

@@ -1,0 +1,70 @@
+-- REVIEW TEMPLATE ONLY: outside auto-applied migrations, deliberately disabled.
+-- Root must verify provider/site/production DB, current Identity+membership and
+-- compiled profile bytes, fill all pins, then make a new reviewed DML migration.
+-- No staff/account/role, approval, decision, outbox or receiver state is seeded.
+DO $seed$
+DECLARE
+  approved boolean := false;
+  profile_and_current_identity_verified boolean := false;
+  compiled_profile_sha256 text := NULL;
+  database_identity uuid := NULL;
+  crm_origin text := NULL;
+  backend_origin text := NULL;
+  fixture_source_key text := NULL;
+  -- Existing historical owner; current server Identity and DB membership must
+  -- both be reverified before enabling this template. This creates no member.
+  existing_reviewer uuid := '90000000-0000-4000-8000-000000000010';
+  source_fingerprint text := encode(sha256(convert_to(
+    '{"source":"SYNTHETIC hosted education fixture","row":"fictional-learner-b","version":"hosted-fixture-v1"}',
+    'UTF8')), 'hex');
+BEGIN
+  PERFORM pg_advisory_xact_lock(7031926);
+  IF NOT approved OR NOT profile_and_current_identity_verified
+     OR current_database()<>'netlifydb'
+     OR compiled_profile_sha256 IS NULL OR compiled_profile_sha256 !~ '^[0-9a-f]{64}$'
+     OR database_identity IS NULL OR crm_origin IS NULL OR backend_origin IS NULL
+     OR fixture_source_key IS NULL
+     OR crm_origin !~ '^https://[a-z0-9.-]+$' OR backend_origin !~ '^https://[a-z0-9.-]+$'
+     OR crm_origin=backend_origin
+     OR fixture_source_key !~ '^epdg-hosted-synthetic:[A-Za-z0-9:_-]{1,120}$' THEN
+    RAISE EXCEPTION 'Disabled template: exact verified hosted profile and database required' USING ERRCODE='55000';
+  END IF;
+  IF NOT EXISTS(SELECT 1 FROM public.crm_members m WHERE m.id=existing_reviewer
+      AND m.active AND m.role='owner' AND m.email='owner@emerson.example') THEN
+    RAISE EXCEPTION 'Existing current verified owner membership required; no grants are performed' USING ERRCODE='55000';
+  END IF;
+  IF EXISTS(SELECT 1 FROM public.crm_records WHERE id IN (
+      '81000000-0000-4000-8000-000000000001'::uuid,
+      '82000000-0000-4000-8000-000000000001'::uuid,
+      '83000000-0000-4000-8000-000000000001'::uuid,
+      '88000000-0000-4000-8000-000000000001'::uuid))
+      OR EXISTS(SELECT 1 FROM public.crm_records WHERE source_key=fixture_source_key)
+      OR EXISTS(SELECT 1 FROM public.crm_education_hosted_identity) THEN
+    RAISE EXCEPTION 'Synthetic seed collision: operator review required, no row replacement allowed' USING ERRCODE='55000';
+  END IF;
+  INSERT INTO public.crm_records(id,kind,title,access,owner_id,data) VALUES
+    ('81000000-0000-4000-8000-000000000001','contact','SYNTHETIC hosted learner B','hr',existing_reviewer,
+      '{"educationFixture":true,"email":"learner-b@epdg.invalid","contactPermission":"Do not contact","suppressed":true}'::jsonb),
+    ('83000000-0000-4000-8000-000000000001','organization','SYNTHETIC hosted education program','hr',existing_reviewer,
+      '{"educationFixture":true,"educationProgram":true}'::jsonb);
+  INSERT INTO public.crm_records(id,kind,title,access,owner_id,source_key,data) VALUES
+    ('82000000-0000-4000-8000-000000000001','application','SYNTHETIC hosted program application','hr',existing_reviewer,fixture_source_key,
+      '{"workflow":"program","educationFixture":true,"personId":"81000000-0000-4000-8000-000000000001","crmProgramId":"83000000-0000-4000-8000-000000000001","stage":"Applied","sourceVersion":"hosted-fixture-v1"}'::jsonb),
+    ('88000000-0000-4000-8000-000000000001','intake','SYNTHETIC hosted program intake','hr',existing_reviewer,fixture_source_key,
+      jsonb_build_object('workflow','program','educationFixture',true,'status','applied',
+        'caseId','82000000-0000-4000-8000-000000000001','personId','81000000-0000-4000-8000-000000000001',
+        'sourceName','SYNTHETIC hosted education fixture','sourceId','fictional-learner-b',
+        'sourceVersion','hosted-fixture-v1','sourceFingerprint',source_fingerprint));
+  INSERT INTO public.crm_education_hosted_identity(id,site_id,database_name,crm_origin,backend_origin,
+      application_id,person_id,program_id,source_key,reviewer_ids,synthetic_only) VALUES
+    (database_identity,'c83673f3-4449-4ede-b336-33bb3d816de8','netlifydb',crm_origin,backend_origin,
+      '82000000-0000-4000-8000-000000000001','81000000-0000-4000-8000-000000000001',
+      '83000000-0000-4000-8000-000000000001',fixture_source_key,jsonb_build_array(existing_reviewer::text),true);
+  INSERT INTO public.crm_audit(record_id,actor_id,action,after)
+    SELECT r.id,existing_reviewer,'synthetic hosted fixture seeded',
+      jsonb_build_object('educationFixture',true,'sourceKey',fixture_source_key,'compiledProfileSha256',compiled_profile_sha256)
+    FROM public.crm_records r WHERE r.id IN (
+      '81000000-0000-4000-8000-000000000001'::uuid,'82000000-0000-4000-8000-000000000001'::uuid,
+      '83000000-0000-4000-8000-000000000001'::uuid,'88000000-0000-4000-8000-000000000001'::uuid);
+END;
+$seed$;
