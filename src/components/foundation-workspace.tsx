@@ -41,6 +41,20 @@ type Member = {
   hr?: boolean
   active?: boolean
 }
+type ImportBatchType = 'contacts' | 'organizations' | 'resources'
+type ImportAssignment = FoundationRecord & {
+  data: RecordData & {
+    assignmentType: 'intake'
+    batchType: ImportBatchType
+    assigneeId: string
+    sourceName: string
+    sourceVersion: string
+    workflow: string
+    batchIndex: number
+    batchCount: number
+    mappingVersion: number
+  }
+}
 export type FoundationSection =
   'Directory' | 'Workflows' | 'Import review' | 'Library'
 type Props = {
@@ -84,13 +98,56 @@ const intakeFields = [
   ['contactPermission', 'Contact permission'],
   ['permissionEvidence', 'Marketing permission evidence URL'],
 ] as const
+const organizationImportFields = [
+  ['sourceId', 'Stable source row ID'],
+  ['sourceVersion', 'Source version / tab'],
+  ['sourceRow', 'Original source row'],
+  ['sourceUrl', 'Source URL'],
+  ['sourceCreatedAt', 'Original source created timestamp'],
+  ['sourceUpdatedAt', 'Current source updated timestamp'],
+  ['name', 'Organization name'],
+  ['website', 'Website'],
+  ['organizationType', 'Organization type'],
+  ['location', 'Location'],
+  ['notes', 'Notes'],
+  ['nextAction', 'Next action'],
+  ['nextDue', 'Next action due'],
+] as const
+const resourceImportFields = [
+  ['sourceId', 'Stable source row ID'],
+  ['sourceVersion', 'Source version / tab'],
+  ['sourceRow', 'Original source row'],
+  ['sourceUrl', 'Source URL'],
+  ['sourceCreatedAt', 'Original source created timestamp'],
+  ['sourceUpdatedAt', 'Current source updated timestamp'],
+  ['name', 'Resource title'],
+  ['resourceType', 'Resource type (template/training)'],
+  ['body', 'Resource content'],
+  ['assetUrl', 'HTTPS asset URL'],
+  ['description', 'Description'],
+  ['category', 'Category'],
+  ['organization', 'Existing organization name'],
+] as const
 const applicantIntakeFields = [
   ['applicantId', 'Original applicant ID'],
+  ['personSourceId', 'Stable HR person ID'],
+  ['applicationSourceId', 'Stable HR application ID'],
   ['program', 'Program'],
   ['cohort', 'Cohort'],
   ['resumeUrl', 'Restricted r�sum� source URL'],
   ['onboardingStatus', 'Source onboarding status (descriptive)'],
+  [
+    'participationState',
+    'Current source state (active/withdrawn/revoked/unknown)',
+  ],
+  ['sourceCreatedAt', 'Original source created timestamp'],
+  ['sourceUpdatedAt', 'Current source updated timestamp'],
 ] as const
+const intakeCsvByteLimit = 20_000_000
+const intakeCsvRowLimit = 10_000
+const intakeChunkSize = 100
+const intakeRequestByteLimit = 3_000_000
+const intakeMappingVersion = 2
 const human = (value: unknown) =>
   String(value ?? '').replace(/([a-z])([A-Z])/g, '$1 $2')
 const iso = (value: string) => (value ? new Date(value).toISOString() : '')
@@ -1375,9 +1432,9 @@ export function parseIntakeCSV(text: string): string[][] {
   if (rows[0]) rows[0][0] = rows[0][0].replace(/^\uFEFF/, '')
   if (!rows.length || rows.length < 2)
     throw Error('Include a header row and at least one data row.')
-  if (rows.length > 101)
+  if (rows.length > intakeCsvRowLimit + 1)
     throw Error(
-      'Review up to 100 rows per batch. Split the CSV before uploading.',
+      `This importer supports up to ${intakeCsvRowLimit.toLocaleString()} source rows per file.`,
     )
   if (rows.some((r) => r.length !== rows[0].length))
     throw Error(
@@ -1398,9 +1455,245 @@ export function mappedDueDate(value: string) {
   return new Date(timestamp).toISOString()
 }
 
+export function mappedSourceTimestamp(value: string) {
+  const timestamp = value.trim()
+  if (
+    !/T.*(?:Z|[+-]\d{2}:\d{2})$/i.test(timestamp) ||
+    !Number.isFinite(Date.parse(timestamp))
+  )
+    throw Error(
+      'Source timestamps require an ISO timestamp with Z or an explicit timezone offset. Normalize the source timezone; the importer will not guess it.',
+    )
+  return new Date(timestamp).toISOString()
+}
+
+type IntakeBatchCounts = {
+  total: number
+  newlyQueued: number
+  existingRows: number
+  accepted: number
+  created: number
+  matched: number
+  failed: number
+  excluded: number
+  open: number
+  reviewReady: number
+  held: number
+  alreadyApplied: number
+  alreadyExcluded: number
+}
+type IntakeBatchReceipt = IntakeBatchCounts & {
+  confirmedBatches: number
+  totalBatches: number
+  notConfirmed: number
+  batchIds: string[]
+  mappingVersion: number
+}
+const emptyIntakeCounts = (): IntakeBatchCounts => ({
+  total: 0,
+  newlyQueued: 0,
+  existingRows: 0,
+  accepted: 0,
+  created: 0,
+  matched: 0,
+  failed: 0,
+  excluded: 0,
+  open: 0,
+  reviewReady: 0,
+  held: 0,
+  alreadyApplied: 0,
+  alreadyExcluded: 0,
+})
+const addIntakeCounts = (
+  target: IntakeBatchCounts,
+  source: IntakeBatchCounts,
+) => {
+  for (const key of [
+    'total',
+    'newlyQueued',
+    'existingRows',
+    'accepted',
+    'created',
+    'matched',
+    'failed',
+    'excluded',
+    'open',
+    'reviewReady',
+    'held',
+    'alreadyApplied',
+    'alreadyExcluded',
+  ] as const)
+    target[key] += source[key]
+}
+const intakeBatchReceiptLabel = (batchIds: string[]) => {
+  const shown = batchIds.slice(0, 3).map((id) => id.slice(0, 10))
+  const remaining = batchIds.length - shown.length
+  return `${batchIds.length} batch receipt${batchIds.length === 1 ? '' : 's'} (${shown.join(', ')}${remaining ? `, +${remaining} more` : ''})`
+}
+function intakeBatches(
+  rows: Record<string, unknown>[],
+  sourceName: string,
+  workflow: string,
+) {
+  const encoder = new TextEncoder()
+  const batches: Record<string, unknown>[][] = []
+  let current: Record<string, unknown>[] = []
+  for (const row of rows) {
+    const candidate = [...current, row]
+    const bytes = encoder.encode(
+      JSON.stringify({
+        action: 'intake-preview',
+        sourceName,
+        workflow,
+        mappingVersion: intakeMappingVersion,
+        rows: candidate,
+      }),
+    ).length
+    if (candidate.length > intakeChunkSize || bytes > intakeRequestByteLimit) {
+      if (!current.length)
+        throw Error(
+          'One source row is too large for a safe CRM request. Remove embedded document contents and retain a permission-checked HTTPS source link.',
+        )
+      batches.push(current)
+      current = [row]
+      const singleRowBytes = encoder.encode(
+        JSON.stringify({
+          action: 'intake-preview',
+          sourceName,
+          workflow,
+          mappingVersion: intakeMappingVersion,
+          rows: current,
+        }),
+      ).length
+      if (singleRowBytes > intakeRequestByteLimit)
+        throw Error(
+          'One source row is too large for a safe CRM request. Remove embedded document contents and retain a permission-checked HTTPS source link.',
+        )
+    } else current = candidate
+  }
+  if (current.length) batches.push(current)
+  return batches
+}
+
+function ImportAssignmentPanel({
+  staff,
+  receipts,
+  api,
+  onCreated,
+}: {
+  staff: Member[]
+  receipts: FoundationRecord[]
+  api: Props['api']
+  onCreated: () => Promise<unknown>
+}) {
+  const operators = staff.filter(
+    (person) =>
+      person.active && person.role === 'contributor' && person.hr !== true,
+  )
+  const [assigneeId, setAssigneeId] = useState('')
+  const [receiptId, setReceiptId] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  return (
+    <section className="foundation-card foundation-full">
+      <h2>Assign a manager-approved preview</h2>
+      <p className="foundation-help">
+        Only an active non-HR contributor can be assigned. The assignment is
+        bound to the exact server-approved preview content and row set. It does
+        not create an account or grant HR, outreach or applicant access.
+      </p>
+      {!operators.length ? (
+        <p className="foundation-help">
+          No active non-HR contributors are available for assignment.
+        </p>
+      ) : !receipts.length ? (
+        <p className="foundation-help">
+          Preview an ordinary contact, organization-only or service-resource
+          batch first. Restricted applicant previews cannot be assigned.
+        </p>
+      ) : (
+        <form
+          className="foundation-form"
+          onSubmit={async (event) => {
+            event.preventDefault()
+            setBusy(true)
+            setError('')
+            try {
+              await api({
+                action: 'intake-assignment-create',
+                assigneeId,
+                receiptId,
+              })
+              setReceiptId('')
+              await onCreated()
+            } catch (cause) {
+              setError(
+                cause instanceof Error
+                  ? cause.message
+                  : 'The batch assignment could not be saved.',
+              )
+            } finally {
+              setBusy(false)
+            }
+          }}
+        >
+          <label className="foundation-field">
+            <span>Approved preview *</span>
+            <select
+              required
+              value={receiptId}
+              onChange={(event) => setReceiptId(event.target.value)}
+            >
+              <option value="">Select a preview receipt</option>
+              {receipts.map((receipt) => {
+                const versions = Array.isArray(receipt.data.sourceVersions)
+                  ? receipt.data.sourceVersions
+                  : []
+                return (
+                  <option key={receipt.id} value={receipt.id}>
+                    {receipt.data.sourceName} · {receipt.data.batchType} · v
+                    {String(versions[0] || 'unknown')} · batch{' '}
+                    {receipt.data.batchIndex}/{receipt.data.batchCount}
+                  </option>
+                )
+              })}
+            </select>
+          </label>
+          <label className="foundation-field">
+            <span>Assigned operator *</span>
+            <select
+              required
+              value={assigneeId}
+              onChange={(event) => setAssigneeId(event.target.value)}
+            >
+              <option value="">Select active contributor</option>
+              {operators.map((operator) => (
+                <option key={operator.id} value={operator.id}>
+                  {operator.name || operator.id}
+                </option>
+              ))}
+            </select>
+          </label>
+          {error && (
+            <p className="form-error foundation-full" role="alert">
+              {error}
+            </p>
+          )}
+          <div className="form-footer foundation-full">
+            <button type="submit" className="primary" disabled={busy}>
+              {busy ? 'Assigning batch…' : 'Assign batch'}
+            </button>
+          </div>
+        </form>
+      )}
+    </section>
+  )
+}
+
 function ImportReview({
   records,
   member,
+  staff,
   api,
   reload,
   onNotice,
@@ -1410,17 +1703,72 @@ function ImportReview({
   const [selected, setSelected] = useState<FoundationRecord | null>(null)
   const [filter, setFilter] = useState('All')
   const rows = records.filter((r) => r.kind === 'intake')
-  const canReview = ['owner', 'manager'].includes(member.role)
+  const isManager = ['owner', 'manager'].includes(member.role)
+  const assignments = records.filter(
+    (record): record is ImportAssignment =>
+      record.kind === 'import' &&
+      record.data.assignmentType === 'intake' &&
+      record.data.status === 'assigned' &&
+      record.data.assigneeId === member.id,
+  )
+  const assignableReceipts = records.filter((record) => {
+    const versions = record.data.sourceVersions
+    const batchType = record.data.batchType || 'contacts'
+    return (
+      record.kind === 'import' &&
+      !!record.data.batchId &&
+      record.data.status === 'queued for review' &&
+      !record.data.assignmentId &&
+      !!record.data.sourceFingerprint &&
+      Array.isArray(record.data.targetIds) &&
+      ['contacts', 'organizations', 'resources'].includes(String(batchType)) &&
+      (batchType !== 'contacts' || !isHrWorkflow(record.data.workflow)) &&
+      Array.isArray(versions) &&
+      versions.length === 1
+    )
+  })
+  const [assignmentId, setAssignmentId] = useState('')
+  const selectedAssignment = assignments.find(
+    (assignment) => assignment.id === assignmentId,
+  )
+  const canReview = isManager || !!selectedAssignment
   const [pulling, setPulling] = useState(false)
   return (
     <>
       <Intro
         icon={<Upload size={19} />}
-        title="Review sources before adding people"
-        text="Map a small CSV batch into a protected review queue. Every row needs a deliberate decision; uploads do not create contacts, enroll applicants or send messages."
+        title="Review assigned CRM source batches"
+        text="Contact, organization-only and service-resource batches are previewed before review. Applicants remain restricted to HR; resource imports create only resources awaiting library review."
       />
+      {isManager && (
+        <ImportAssignmentPanel
+          staff={staff}
+          receipts={assignableReceipts}
+          api={api}
+          onCreated={reload}
+        />
+      )}
       <div className="foundation-toolbar">
-        {canReview && syntheticWebsiteIntake && (
+        {!isManager && (
+          <label className="foundation-field">
+            <span>Assigned import batch</span>
+            <select
+              aria-label="Assigned import batch"
+              value={assignmentId}
+              onChange={(event) => setAssignmentId(event.target.value)}
+            >
+              <option value="">Select your assigned batch</option>
+              {assignments.map((assignment) => (
+                <option key={assignment.id} value={assignment.id}>
+                  {assignment.data.sourceName} · {assignment.data.batchType} · v
+                  {assignment.data.sourceVersion} · batch{' '}
+                  {assignment.data.batchIndex}/{assignment.data.batchCount}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        {isManager && syntheticWebsiteIntake && (
           <button
             type="button"
             disabled={pulling}
@@ -1477,7 +1825,8 @@ function ImportReview({
             className="primary"
             onClick={() => setShowUpload(true)}
           >
-            <Upload size={15} /> Map CSV batch
+            <Upload size={15} />{' '}
+            {selectedAssignment ? 'Upload assigned batch' : 'Map CSV batch'}
           </button>
         )}
       </div>
@@ -1505,7 +1854,13 @@ function ImportReview({
               >
                 {r.data.status}
               </span>
-              <small>{workflowNames[r.data.workflow || '']}</small>
+              <small>
+                {r.data.batchType === 'organizations'
+                  ? 'Organizations only'
+                  : r.data.batchType === 'resources'
+                    ? 'Service resources only'
+                    : workflowNames[r.data.workflow || '']}
+              </small>
             </td>
             <td>
               {r.data.nextAction || 'Review source'}
@@ -1517,12 +1872,19 @@ function ImportReview({
       {showUpload && (
         <IntakeMapper
           member={member}
+          assignment={isManager ? undefined : selectedAssignment}
           api={api}
           onClose={() => setShowUpload(false)}
-          onSaved={async () => {
+          onSaved={async (receipt) => {
             setShowUpload(false)
             onNotice(
-              'Batch queued for individual review. No directory or workflow records were created.',
+              `${intakeBatchReceiptLabel(receipt.batchIds)}: ${receipt.created} created, ${receipt.matched} matched, ${receipt.held} held, ${receipt.failed} failed, ${receipt.existingRows} existing, ${receipt.open} still open. No applicant enrollment or contact permission was granted.`,
+            )
+            await reload()
+          }}
+          onPartial={async (receipt) => {
+            onNotice(
+              `Partial ${intakeBatchReceiptLabel(receipt.batchIds)}: ${receipt.created} created, ${receipt.matched} matched, ${receipt.held} held, ${receipt.failed} failed, ${receipt.existingRows} existing, ${receipt.open} still open. ${receipt.notConfirmed} rows were not confirmed. Re-upload the identical source to reconcile safely.`,
             )
             await reload()
           }}
@@ -1532,7 +1894,17 @@ function ImportReview({
         <IntakeDecision
           record={selected}
           records={records}
-          canReview={canReview}
+          canReview={
+            isManager ||
+            assignments.some(
+              (assignment) => assignment.id === selected.data.batchAssignmentId,
+            )
+          }
+          assignmentId={
+            isManager
+              ? undefined
+              : (selected.data.batchAssignmentId as string | undefined)
+          }
           api={api}
           onClose={() => setSelected(null)}
           onSaved={async () => {
@@ -1547,28 +1919,51 @@ function ImportReview({
 
 function IntakeMapper({
   member,
+  assignment,
   api,
   onClose,
   onSaved,
+  onPartial,
 }: {
   member: Member
+  assignment?: ImportAssignment
   api: Props['api']
   onClose: () => void
-  onSaved: () => Promise<void>
+  onSaved: (receipt: IntakeBatchReceipt) => Promise<void>
+  onPartial: (receipt: IntakeBatchReceipt) => Promise<void>
 }) {
   const [csv, setCsv] = useState<string[][]>([])
   const [mapping, setMapping] = useState<Record<string, string>>({})
-  const [sourceName, setSourceName] = useState('')
-  const [workflow, setWorkflow] = useState('class')
+  const [sourceName, setSourceName] = useState(
+    assignment?.data.sourceName || '',
+  )
+  const [workflow, setWorkflow] = useState(assignment?.data.workflow || 'class')
+  const [batchType, setBatchType] = useState<ImportBatchType>(
+    assignment?.data.batchType || 'contacts',
+  )
   const [nextAction, setNextAction] = useState('Review inquiry')
   const [nextDue, setNextDue] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const hr = member.role === 'owner' || !!member.hr
+  const [progress, setProgress] = useState({ done: 0, total: 0 })
+  const [partialReceipt, setPartialReceipt] =
+    useState<IntakeBatchReceipt | null>(null)
+  const hr = !assignment && (member.role === 'owner' || !!member.hr)
   const headers = csv[0] || []
-  const mappedFields = isHrWorkflow(workflow)
-    ? [...intakeFields, ...applicantIntakeFields]
-    : intakeFields
+  const mappedFields =
+    batchType === 'organizations'
+      ? organizationImportFields
+      : batchType === 'resources'
+        ? resourceImportFields
+        : isHrWorkflow(workflow)
+          ? [...intakeFields, ...applicantIntakeFields]
+          : intakeFields
+  const requiredFields =
+    batchType === 'contacts'
+      ? ['sourceId', 'name', 'email']
+      : batchType === 'organizations'
+        ? ['sourceId', 'name']
+        : ['sourceId', 'name', 'resourceType']
   return (
     <FoundationDialog
       title="Map a CSV batch"
@@ -1581,62 +1976,212 @@ function IntakeMapper({
           e.preventDefault()
           setBusy(true)
           setError('')
+          let latestReceipt: IntakeBatchReceipt | null = null
           try {
             if (
               !csv.length ||
-              mapping.sourceId === undefined ||
-              mapping.name === undefined ||
-              mapping.email === undefined
+              requiredFields.some((key) => mapping[key] === undefined) ||
+              (assignment && mapping.sourceVersion === undefined)
             )
               throw Error(
-                'Map the stable source row ID, person name and email columns.',
+                batchType === 'contacts'
+                  ? 'Map the stable source row ID, person name and email columns.'
+                  : 'Map the stable source row ID, source name and required batch fields.',
               )
-            const rows = csv
+            if (
+              batchType === 'resources' &&
+              mapping.body === undefined &&
+              mapping.assetUrl === undefined
+            )
+              throw Error('Map resource content or an HTTPS asset URL.')
+            const sourceIds = csv
               .slice(1)
-              .map((row) =>
-                Object.fromEntries(
-                  mappedFields.map(([key]) => [
-                    key,
-                    mapping[key] === undefined || mapping[key] === ''
-                      ? ''
-                      : row[Number(mapping[key])],
-                  ]),
-                ),
+              .map((row) => String(row[Number(mapping.sourceId)] || '').trim())
+            if (
+              sourceIds.some((id) => !id) ||
+              new Set(sourceIds).size !== sourceIds.length
+            )
+              throw Error(
+                'Every row needs a unique, stable source ID. Reconcile repeated or blank IDs in the source before importing.',
               )
-            await api({
-              action: 'intake-preview',
-              sourceName,
-              workflow,
-              rows: rows.map((row) => ({
-                ...row,
-                nextAction: row.nextAction || nextAction,
-                nextDue: row.nextDue
-                  ? mappedDueDate(row.nextDue)
-                  : iso(nextDue),
-                contactPermission: row.contactPermission || 'Unknown',
-              })),
+            const rows = csv.slice(1).map((row) => {
+              const mapped = Object.fromEntries(
+                mappedFields.map(([key]) => [
+                  key,
+                  mapping[key] === undefined || mapping[key] === ''
+                    ? ''
+                    : row[Number(mapping[key])],
+                ]),
+              )
+              const sourceFieldColumns = Object.fromEntries(
+                mappedFields.flatMap(([key]) => {
+                  const index = mapping[key]
+                  return index === undefined || index === ''
+                    ? []
+                    : [
+                        [
+                          key,
+                          headers[Number(index)].trim() ||
+                            `Column ${Number(index) + 1}`,
+                        ],
+                      ]
+                }),
+              )
+              return {
+                ...mapped,
+                ...(batchType !== 'resources'
+                  ? {
+                      nextAction: mapped.nextAction || nextAction,
+                      nextDue: mapped.nextDue
+                        ? mappedDueDate(String(mapped.nextDue))
+                        : iso(nextDue),
+                    }
+                  : {}),
+                sourceFieldColumns,
+              }
             })
-            await onSaved()
+            const batches = intakeBatches(
+              rows,
+              sourceName,
+              batchType === 'contacts' ? workflow : '',
+            )
+            if (assignment && batches.length !== 1)
+              throw Error(
+                'An assignment covers one bounded batch. Upload at most 100 rows in one request-sized source batch.',
+              )
+            const totalBatches = batches.length
+            const receipt: IntakeBatchReceipt = {
+              ...emptyIntakeCounts(),
+              confirmedBatches: 0,
+              totalBatches,
+              notConfirmed: rows.length,
+              batchIds: [],
+              mappingVersion: intakeMappingVersion,
+            }
+            latestReceipt = receipt
+            setProgress({ done: 0, total: totalBatches })
+            setPartialReceipt(receipt)
+            for (let index = 0; index < totalBatches; index++) {
+              const batchRows = batches[index]
+              const response = await api({
+                action: 'intake-preview',
+                sourceName,
+                ...(batchType === 'contacts' ? { workflow } : {}),
+                batchType,
+                ...(assignment
+                  ? {
+                      assignmentId: assignment.id,
+                      sourceVersion: assignment.data.sourceVersion,
+                      batchIndex: assignment.data.batchIndex,
+                      batchCount: assignment.data.batchCount,
+                      mappingVersion: assignment.data.mappingVersion,
+                    }
+                  : {
+                      batchIndex: index + 1,
+                      batchCount: totalBatches,
+                      mappingVersion: intakeMappingVersion,
+                    }),
+                rows: batchRows.map((row) => ({
+                  ...row,
+                  nextAction: row.nextAction || nextAction,
+                  nextDue: row.nextDue
+                    ? mappedDueDate(String(row.nextDue))
+                    : iso(nextDue),
+                  sourceCreatedAt: row.sourceCreatedAt
+                    ? mappedSourceTimestamp(String(row.sourceCreatedAt))
+                    : '',
+                  sourceUpdatedAt: row.sourceUpdatedAt
+                    ? mappedSourceTimestamp(String(row.sourceUpdatedAt))
+                    : '',
+                  ...(batchType === 'contacts'
+                    ? { contactPermission: row.contactPermission || 'Unknown' }
+                    : {}),
+                })),
+              })
+              if (
+                !response ||
+                typeof response !== 'object' ||
+                !('summary' in response) ||
+                !('receipt' in response)
+              )
+                throw Error(
+                  `Batch ${index + 1} did not return a durable receipt. Re-upload the identical source to reconcile safely.`,
+                )
+              if (!response.receipt || typeof response.receipt !== 'object')
+                throw Error(
+                  `Batch ${index + 1} did not return a durable receipt. Re-upload the identical source to reconcile safely.`,
+                )
+              const summary = response.summary as IntakeBatchCounts
+              const serverReceipt = response.receipt as {
+                id: string
+                batchId: string
+                mappingVersion: number
+              }
+              if (
+                !summary ||
+                summary.total !== batchRows.length ||
+                !(
+                  [
+                    'total',
+                    'newlyQueued',
+                    'existingRows',
+                    'accepted',
+                    'created',
+                    'matched',
+                    'failed',
+                    'excluded',
+                    'open',
+                    'reviewReady',
+                    'held',
+                    'alreadyApplied',
+                    'alreadyExcluded',
+                  ] as const
+                ).every((key) => typeof summary[key] === 'number') ||
+                typeof serverReceipt.id !== 'string' ||
+                typeof serverReceipt.batchId !== 'string' ||
+                serverReceipt.mappingVersion !== intakeMappingVersion
+              )
+                throw Error(
+                  `Batch ${index + 1} returned an incomplete receipt. Re-upload the identical source to reconcile safely.`,
+                )
+              addIntakeCounts(receipt, summary)
+              receipt.confirmedBatches++
+              receipt.notConfirmed -= batchRows.length
+              if (!receipt.batchIds.includes(serverReceipt.batchId))
+                receipt.batchIds.push(serverReceipt.batchId)
+              latestReceipt = { ...receipt }
+              setProgress({ done: index + 1, total: totalBatches })
+              setPartialReceipt(latestReceipt)
+            }
+            await onSaved(receipt)
           } catch (err) {
             setError(
               err instanceof Error
-                ? err.message
+                ? `${err.message}${latestReceipt?.confirmedBatches ? ` ${latestReceipt.confirmedBatches} of ${latestReceipt.totalBatches} batches were confirmed; retry the identical source to reconcile any uncertain response.` : ''}`
                 : 'Could not queue this batch.',
             )
+            if (latestReceipt?.confirmedBatches) await onPartial(latestReceipt)
             setBusy(false)
           }
         }}
       >
         <p className="foundation-help">
-          UTF-8 CSV, up to 100 rows and 1 MB. Select explicit columns for each
-          source version; repeated questions must not be guessed. Source row IDs
-          must remain stable across repeated imports. The default due date uses
-          your device timezone. Mapped due dates need an ISO timestamp with Z or
-          an explicit timezone offset; original response dates are not inferred.
-          Applicant details are mapped only into HR-restricted applicant
-          workflows. Source onboarding status describes the source record; it
-          does not grant HR clearance, learner enrollment, staff access or
-          training completion.
+          UTF-8 CSV, up to 10,000 rows and 20 MB. Manager imports send
+          sequential batches of at most 100; an assignment covers one bounded
+          batch and saves an access-scoped receipt. Invalid source rows count as
+          failed; duplicate, conflicting, and test rows remain held for review.
+          For HR imports, PENDING RECONCILIATION is a placeholder and cannot be
+          used as a stable identity. Select explicit columns for each source
+          version; repeated questions must not be guessed. Source row IDs must
+          remain stable across repeated imports. Applicant imports can retain
+          stable person/application IDs, current withdrawal state, source
+          timestamps and field-level column provenance. Timestamps require an
+          explicit timezone. The default due date uses your device timezone.
+          Mapped due dates need an ISO timestamp with Z or an explicit timezone
+          offset; local source dates are never inferred. Applicant details are
+          mapped only into HR-restricted applicant workflows. Source onboarding
+          status describes the source record; it does not grant HR clearance,
+          learner enrollment, staff access or training completion.
         </p>
         {error && (
           <p className="form-error" role="alert">
@@ -1657,8 +2202,8 @@ function IntakeMapper({
                 const file = e.target.files?.[0]
                 if (!file) return
                 try {
-                  if (file.size > 1_000_000)
-                    throw Error('Choose a CSV smaller than 1 MB.')
+                  if (file.size > intakeCsvByteLimit)
+                    throw Error('Choose a CSV smaller than 20 MB.')
                   const parsed = parseIntakeCSV(await file.text())
                   setCsv(parsed)
                   const proposed: Record<string, string> = {}
@@ -1684,42 +2229,65 @@ function IntakeMapper({
             <input
               required
               value={sourceName}
+              readOnly={!!assignment}
               onChange={(e) => setSourceName(e.target.value)}
               placeholder="Exact form + tab + version"
             />
           </label>
-          <label className="foundation-field">
-            <span>Destination workflow *</span>
-            <select
-              value={workflow}
-              onChange={(e) => setWorkflow(e.target.value)}
-            >
-              {Object.entries(workflowNames)
-                .filter(([key]) => hr || !['program', 'sales'].includes(key))
-                .map(([key, label]) => (
-                  <option key={key} value={key}>
-                    {label}
-                  </option>
-                ))}
-            </select>
-          </label>
-          <label className="foundation-field">
-            <span>Default next action *</span>
-            <input
-              required
-              value={nextAction}
-              onChange={(e) => setNextAction(e.target.value)}
-            />
-          </label>
-          <label className="foundation-field">
-            <span>Default due date *</span>
-            <input
-              type="datetime-local"
-              required
-              value={nextDue}
-              onChange={(e) => setNextDue(e.target.value)}
-            />
-          </label>
+          {!assignment && (
+            <label className="foundation-field">
+              <span>Batch type *</span>
+              <select
+                value={batchType}
+                onChange={(e) =>
+                  setBatchType(e.target.value as ImportBatchType)
+                }
+              >
+                <option value="contacts">Ordinary contacts</option>
+                <option value="organizations">Organizations only</option>
+                <option value="resources">Service resources only</option>
+              </select>
+            </label>
+          )}
+          {batchType === 'contacts' && (
+            <label className="foundation-field">
+              <span>Destination workflow *</span>
+              <select
+                value={workflow}
+                disabled={!!assignment}
+                onChange={(e) => setWorkflow(e.target.value)}
+              >
+                {Object.entries(workflowNames)
+                  .filter(([key]) => hr || !['program', 'sales'].includes(key))
+                  .map(([key, label]) => (
+                    <option key={key} value={key}>
+                      {label}
+                    </option>
+                  ))}
+              </select>
+            </label>
+          )}
+          {batchType !== 'resources' && (
+            <>
+              <label className="foundation-field">
+                <span>Default next action *</span>
+                <input
+                  required
+                  value={nextAction}
+                  onChange={(e) => setNextAction(e.target.value)}
+                />
+              </label>
+              <label className="foundation-field">
+                <span>Default due date *</span>
+                <input
+                  type="datetime-local"
+                  required
+                  value={nextDue}
+                  onChange={(e) => setNextDue(e.target.value)}
+                />
+              </label>
+            </>
+          )}
           {!!headers.length && (
             <>
               <p className="foundation-help foundation-full">
@@ -1731,10 +2299,16 @@ function IntakeMapper({
                 <label key={key} className="foundation-field">
                   <span>
                     {label}
-                    {['sourceId', 'name', 'email'].includes(key) ? ' *' : ''}
+                    {requiredFields.includes(key) ||
+                    (assignment && key === 'sourceVersion')
+                      ? ' *'
+                      : ''}
                   </span>
                   <select
-                    required={['sourceId', 'name', 'email'].includes(key)}
+                    required={
+                      requiredFields.includes(key) ||
+                      (!!assignment && key === 'sourceVersion')
+                    }
                     value={mapping[key] || ''}
                     onChange={(e) =>
                       setMapping((current) => ({
@@ -1755,6 +2329,22 @@ function IntakeMapper({
             </>
           )}
         </fieldset>
+        {busy && (
+          <p className="foundation-help foundation-full" role="status">
+            Queueing batch {Math.min(progress.done + 1, progress.total)} of{' '}
+            {progress.total}. Confirmed batches are durable and identical
+            retries reuse their receipts.
+          </p>
+        )}
+        {error && partialReceipt && (
+          <p className="foundation-help foundation-full">
+            Confirmed {partialReceipt.confirmedBatches} of{' '}
+            {partialReceipt.totalBatches} batches; {partialReceipt.newlyQueued}{' '}
+            rows queued, {partialReceipt.existingRows} existing,{' '}
+            {partialReceipt.held} held, {partialReceipt.notConfirmed} rows not
+            confirmed.
+          </p>
+        )}
         <div className="form-footer">
           <button
             type="button"
@@ -1783,6 +2373,7 @@ function IntakeDecision({
   record,
   records,
   canReview,
+  assignmentId,
   api,
   onClose,
   onSaved,
@@ -1790,6 +2381,7 @@ function IntakeDecision({
   record: FoundationRecord
   records: FoundationRecord[]
   canReview: boolean
+  assignmentId?: string
   api: Props['api']
   onClose: () => void
   onSaved: () => Promise<void>
@@ -1811,6 +2403,7 @@ function IntakeDecision({
         revision: record.revision,
         decision: value,
         personId: personId || undefined,
+        assignmentId,
         reason,
       })
       await onSaved()
@@ -1831,9 +2424,11 @@ function IntakeDecision({
       }}
     >
       <p className="foundation-help">
-        Review the source and contact permission. Linking an existing person
-        must preserve suppression and existing history. Repeated source rows
-        cannot create another workflow record.
+        {record.data.batchType === 'resources'
+          ? 'Applying creates only a resource marked Needs review. It does not publish training or change learner access.'
+          : record.data.batchType === 'organizations'
+            ? 'Applying creates only the organization record. Existing identities are held for review.'
+            : 'Review the source and contact permission. Linking an existing person must preserve suppression and existing history. Repeated source rows cannot create another workflow record.'}
       </p>
       <dl className="foundation-details">
         {Object.entries(record.data).map(([key, value]) => (
@@ -1854,29 +2449,32 @@ function IntakeDecision({
       )}
       {canReview && !['applied', 'excluded'].includes(status || '') && (
         <fieldset disabled={busy} className="foundation-form">
-          <div className="foundation-field foundation-full">
-            <span>Existing person (review duplicates before linking)</span>
-            <RecordSelector
-              label="Existing person"
-              options={records
-                .filter(
-                  (r) =>
-                    r.kind === 'contact' &&
-                    String(r.data.email || '')
-                      .trim()
-                      .toLowerCase() ===
-                      String(record.data.email || '')
-                        .trim()
-                        .toLowerCase(),
-                )
-                .map((r) => ({
-                  id: r.id,
-                  label: `${r.title} · ${r.data.email || 'no email'}`,
-                }))}
-              value={personId}
-              onChange={setPersonId}
-            />
-          </div>
+          {record.data.batchType !== 'organizations' &&
+            record.data.batchType !== 'resources' && (
+              <div className="foundation-field foundation-full">
+                <span>Existing person (review duplicates before linking)</span>
+                <RecordSelector
+                  label="Existing person"
+                  options={records
+                    .filter(
+                      (r) =>
+                        r.kind === 'contact' &&
+                        String(r.data.email || '')
+                          .trim()
+                          .toLowerCase() ===
+                          String(record.data.email || '')
+                            .trim()
+                            .toLowerCase(),
+                    )
+                    .map((r) => ({
+                      id: r.id,
+                      label: `${r.title} · ${r.data.email || 'no email'}`,
+                    }))}
+                  value={personId}
+                  onChange={setPersonId}
+                />
+              </div>
+            )}
           <label className="foundation-field foundation-full">
             <span>Review reason *</span>
             <textarea
@@ -1907,9 +2505,13 @@ function IntakeDecision({
             >
               {busy
                 ? 'Saving decision…'
-                : personId
-                  ? 'Link person and apply row'
-                  : 'Apply reviewed row'}
+                : record.data.batchType === 'organizations'
+                  ? 'Create organization'
+                  : record.data.batchType === 'resources'
+                    ? 'Add resource for review'
+                    : personId
+                      ? 'Link person and apply row'
+                      : 'Apply reviewed row'}
             </button>
           </div>
           {['invalid', 'test', 'conflict'].includes(status || '') && (
@@ -1920,9 +2522,9 @@ function IntakeDecision({
           )}
           {status === 'duplicate' && !personId && (
             <p className="foundation-help foundation-full">
-              Choose the existing person with this source email before applying
-              this duplicate. The review keeps their history and contact
-              restrictions.
+              {record.data.batchType === 'contacts'
+                ? 'Choose the existing person with this source email before applying this duplicate. The review keeps their history and contact restrictions.'
+                : 'A matching CRM record already exists. Reconcile it in the directory or library and exclude this source row.'}
             </p>
           )}
         </fieldset>

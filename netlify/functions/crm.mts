@@ -354,9 +354,12 @@ export default async function (req: Request, context?: Context) {
       fail('Unknown education operation.')
     }
     if (
-      ['foundation-save', 'intake-preview', 'intake-review'].includes(
-        body.action,
-      )
+      [
+        'foundation-save',
+        'intake-assignment-create',
+        'intake-preview',
+        'intake-review',
+      ].includes(body.action)
     ) {
       const result = await handleFoundation(db, actor, body)
       // The source edit has committed. Queue any resulting hold promptly, while

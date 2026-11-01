@@ -10,6 +10,7 @@ import { expect, it, vi } from 'vitest'
 import {
   FoundationWorkspace,
   mappedDueDate,
+  mappedSourceTimestamp,
   parseIntakeCSV,
   type FoundationRecord,
 } from './foundation-workspace'
@@ -45,6 +46,13 @@ function setup(
   section: 'Directory' | 'Workflows' | 'Library' | 'Import review',
   records: FoundationRecord[] = [],
   actor = member,
+  staff: {
+    id: string
+    name?: string
+    role: string
+    active?: boolean
+    hr?: boolean
+  }[] = [member],
 ) {
   const api = vi.fn().mockResolvedValue({ record: {} })
   const reload = vi.fn().mockResolvedValue(undefined)
@@ -53,13 +61,103 @@ function setup(
       section={section}
       records={records}
       member={actor}
-      staff={[member]}
+      staff={staff}
       api={api}
       reload={reload}
     />,
   )
   return { ...result, api, reload }
 }
+
+it('lets managers assign only an existing approved import preview', async () => {
+  const receipt: FoundationRecord = {
+    id: 'receipt-1',
+    kind: 'import',
+    title: 'PILOT TEST Receipt',
+    ownerId: member.id,
+    revision: 1,
+    data: {
+      batchId: 'stable-batch-id',
+      batchType: 'contacts',
+      sourceName: 'PILOT TEST Contact source',
+      sourceVersions: ['version-1'],
+      sourceFingerprint: 'content-fingerprint',
+      targetIds: ['intake-1'],
+      workflow: 'service',
+      batchIndex: 1,
+      batchCount: 1,
+      mappingVersion: 2,
+      status: 'queued for review',
+    },
+  }
+  const operator = {
+    id: 'intern-1',
+    name: 'Assigned operator',
+    role: 'contributor',
+    active: true,
+  }
+  const { api } = setup('Import review', [receipt], member, [member, operator])
+  expect(screen.getByText('Assign a manager-approved preview')).toBeVisible()
+  await userEvent.selectOptions(
+    screen.getByLabelText('Approved preview *'),
+    receipt.id,
+  )
+  await userEvent.selectOptions(
+    screen.getByLabelText('Assigned operator *'),
+    operator.id,
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Assign batch' }))
+  await waitFor(() =>
+    expect(api).toHaveBeenCalledWith({
+      action: 'intake-assignment-create',
+      receiptId: receipt.id,
+      assigneeId: operator.id,
+    }),
+  )
+})
+
+it('shows a batch mapper to a contributor only after selecting their CRM assignment', async () => {
+  const operator = {
+    id: 'intern-1',
+    name: 'Assigned operator',
+    role: 'contributor',
+    active: true,
+  }
+  const assignment: FoundationRecord = {
+    id: 'assignment-1',
+    kind: 'import',
+    title: 'PILOT TEST Assigned batch',
+    ownerId: member.id,
+    revision: 1,
+    data: {
+      assignmentType: 'intake',
+      batchType: 'resources',
+      assigneeId: operator.id,
+      sourceName: 'PILOT TEST Resource source',
+      sourceVersion: 'version-1',
+      workflow: '',
+      batchIndex: 1,
+      batchCount: 1,
+      mappingVersion: 2,
+      status: 'assigned',
+    },
+  }
+  setup('Import review', [assignment], operator, [member, operator])
+  expect(
+    screen.queryByRole('button', { name: 'Upload assigned batch' }),
+  ).not.toBeInTheDocument()
+  await userEvent.selectOptions(
+    screen.getByLabelText('Assigned import batch'),
+    assignment.id,
+  )
+  await userEvent.click(
+    screen.getByRole('button', { name: 'Upload assigned batch' }),
+  )
+  expect(screen.getByRole('dialog', { name: 'Map a CSV batch' })).toBeVisible()
+  expect(
+    screen.queryByText('Assign a manager-approved preview'),
+  ).not.toBeInTheDocument()
+})
 
 it('keeps one person with multiple organization affiliations', async () => {
   setup('Directory', [
@@ -313,12 +411,12 @@ it('keeps CSV columns distinct and parses multiline quoted values without guessi
   expect(() => parseIntakeCSV('Name,Email\nOne')).toThrow(
     'different column counts',
   )
-  expect(() =>
+  expect(
     parseIntakeCSV(
       'Name\n' +
         Array.from({ length: 101 }, (_, i) => `PILOT TEST ${i}`).join('\n'),
     ),
-  ).toThrow('100 rows')
+  ).toHaveLength(102)
   expect(mappedDueDate('2026-11-01T09:00:00-05:00')).toBe(
     '2026-11-01T14:00:00.000Z',
   )
@@ -412,6 +510,31 @@ it('requires an explicit matching-person selection for duplicate intake rows', a
 
 it('queues only explicitly mapped source columns and never applies rows during upload', async () => {
   const { api } = setup('Import review')
+  api.mockResolvedValueOnce({
+    rows: [],
+    summary: {
+      total: 1,
+      newlyQueued: 1,
+      existingRows: 0,
+      accepted: 0,
+      created: 0,
+      matched: 0,
+      failed: 0,
+      excluded: 0,
+      open: 1,
+      reviewReady: 1,
+      held: 0,
+      alreadyApplied: 0,
+      alreadyExcluded: 0,
+    },
+    receipt: {
+      id: 'receipt-1',
+      batchId: 'stable-batch-id',
+      batchIndex: 1,
+      batchCount: 1,
+      mappingVersion: 2,
+    },
+  })
   await userEvent.click(screen.getByRole('button', { name: 'Map CSV batch' }))
   const dialog = screen.getByRole('dialog', { name: 'Map a CSV batch' })
   const file = new File(
@@ -460,12 +583,20 @@ it('queues only explicitly mapped source columns and never applies rows during u
     expect.objectContaining({
       action: 'intake-preview',
       sourceName: 'PILOT TEST Intake v2',
+      batchIndex: 1,
+      batchCount: 1,
+      mappingVersion: 2,
       rows: [
         expect.objectContaining({
           sourceId: 'row-1',
           name: 'Pilot',
           email: 'new@example.invalid',
           contactPermission: 'Unknown',
+          sourceFieldColumns: {
+            sourceId: 'Source ID',
+            name: 'Name',
+            email: 'Email',
+          },
         }),
       ],
     }),
@@ -476,6 +607,103 @@ it('queues only explicitly mapped source columns and never applies rows during u
         body.action === 'intake-review' || body.action === 'foundation-save',
     ),
   ).toBe(false)
+})
+
+it('requires timezone-qualified source timestamps', () => {
+  expect(mappedSourceTimestamp('2026-11-01T06:30:00Z')).toBe(
+    '2026-11-01T06:30:00.000Z',
+  )
+  expect(() => mappedSourceTimestamp('2026-11-01 01:30:00')).toThrow(
+    'explicit timezone offset',
+  )
+})
+
+it('queues a large CSV through sequential UI batches with one receipt per batch', async () => {
+  const { api } = setup('Import review')
+  api.mockImplementation(async (body) => {
+    if (!body || typeof body !== 'object' || !('rows' in body))
+      return { record: {} }
+    const count = Array.isArray(body.rows) ? body.rows.length : 0
+    return {
+      rows: [],
+      summary: {
+        total: count,
+        newlyQueued: count,
+        existingRows: 0,
+        accepted: 0,
+        created: 0,
+        matched: 0,
+        failed: 0,
+        excluded: 0,
+        open: count,
+        reviewReady: count,
+        held: 0,
+        alreadyApplied: 0,
+        alreadyExcluded: 0,
+      },
+      receipt: {
+        id: `receipt-${count}`,
+        batchId: `batch-${count}`,
+        batchIndex: body.batchIndex,
+        batchCount: body.batchCount,
+        mappingVersion: 2,
+      },
+    }
+  })
+  await userEvent.click(screen.getByRole('button', { name: 'Map CSV batch' }))
+  const dialog = screen.getByRole('dialog', { name: 'Map a CSV batch' })
+  const csv = [
+    'Name,Email,Source ID',
+    ...Array.from(
+      { length: 101 },
+      (_, index) =>
+        `Person ${index + 1},person${index + 1}@example.org,row-${index + 1}`,
+    ),
+  ].join('\n')
+  const file = new File([csv], 'applicants.csv', { type: 'text/csv' })
+  Object.defineProperty(file, 'text', { value: async () => csv })
+  await userEvent.upload(within(dialog).getByLabelText('CSV file *'), file)
+  await userEvent.type(
+    within(dialog).getByLabelText('Source name / version *'),
+    'Authoritative applicants v1',
+  )
+  fireEvent.change(within(dialog).getByLabelText('Default due date *'), {
+    target: { value: '2026-11-01T09:00' },
+  })
+  await userEvent.selectOptions(
+    within(dialog).getByLabelText('Stable source row ID *'),
+    '2',
+  )
+  await userEvent.selectOptions(
+    within(dialog).getByLabelText('Person name *'),
+    '0',
+  )
+  await userEvent.selectOptions(within(dialog).getByLabelText('Email *'), '1')
+  await userEvent.click(
+    within(dialog).getByRole('button', { name: 'Queue 101 rows for review' }),
+  )
+  await waitFor(() => expect(api).toHaveBeenCalledTimes(2))
+  const calls = api.mock.calls.map(([body]) => body)
+  expect(calls).toEqual([
+    expect.objectContaining({
+      batchIndex: 1,
+      batchCount: 2,
+      mappingVersion: 2,
+      rows: expect.arrayContaining([
+        expect.objectContaining({ sourceId: 'row-1' }),
+      ]),
+    }),
+    expect.objectContaining({
+      batchIndex: 2,
+      batchCount: 2,
+      mappingVersion: 2,
+      rows: [expect.objectContaining({ sourceId: 'row-101' })],
+    }),
+  ])
+  expect((calls[0] as { rows: unknown[] }).rows).toHaveLength(100)
+  expect(
+    await screen.findByText(/2 batch receipts \(batch-100, batch-1\)/),
+  ).toBeInTheDocument()
 })
 
 it('assigns only approved training and requires a staff learner', async () => {

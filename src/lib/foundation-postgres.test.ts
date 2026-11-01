@@ -932,7 +932,382 @@ describe.skipIf(!enabled)(
       expect(first.rows[0].data.status).toBe('test')
       expect(repeat.rows[0].id).toBe(first.rows[0].id)
       expect((await review(first.rows[0])).status).toBe(400)
-      expect(await counts()).toEqual([{ kind: 'intake', count: 1 }])
+      expect(await counts()).toEqual([
+        { kind: 'import', count: 1 },
+        { kind: 'intake', count: 1 },
+      ])
+    })
+
+    it('previews, applies and idempotently reconciles synthetic HR staging fields without enrollment', async () => {
+      context.user = { id: hr }
+      const mapped = {
+        ...next,
+        sourceId: 'staged-application-row-1',
+        sourceVersion: 'staging-v1',
+        sourceRow: 'Applications!A2',
+        sourceUrl: 'https://forms.invalid/rehearsal-form',
+        sourceCreatedAt: '2026-10-25T09:00:00-04:00',
+        sourceUpdatedAt: '2026-11-01T12:00:00Z',
+        personSourceId: 'staged-person-key-1',
+        applicationSourceId: 'staged-application-key-1',
+        participationState: 'withdrawn',
+        program: 'Global Internship Program',
+        cohort: 'Fall 2026',
+        onboardingStatus: 'Awaiting verification',
+        resumeUrl: 'https://assets.invalid/rehearsal-resume',
+        name: 'Candidate Alpha',
+        email: 'candidate-alpha@rehearsal.local',
+        sourceFieldColumns: {
+          name: 'Applicant Name',
+          email: 'Applicant Email',
+          personSourceId: 'Stable Person ID',
+          applicationSourceId: 'Stable Application ID',
+          participationState: 'Current participation state',
+          sourceCreatedAt: 'Original created timestamp',
+          sourceUpdatedAt: 'Latest updated timestamp',
+        },
+      }
+      const preview = {
+        action: 'intake-preview',
+        sourceName: 'Restricted HR staging v1',
+        workflow: 'program',
+        batchIndex: 1,
+        batchCount: 1,
+        mappingVersion: 3,
+        rows: [mapped],
+      }
+      const first = await call(preview)
+      expect(first.status).toBe(200)
+      const firstBody = await first.json()
+      expect(firstBody.summary).toMatchObject({
+        total: 1,
+        newlyQueued: 1,
+        existingRows: 0,
+        reviewReady: 1,
+        held: 0,
+        open: 1,
+      })
+      const queued = (
+        await rehearsalDatabase()
+          .select()
+          .from(schema.records)
+          .where(eq(schema.records.kind, 'intake'))
+      )[0]
+      const receipt = (
+        await rehearsalDatabase()
+          .select()
+          .from(schema.records)
+          .where(eq(schema.records.kind, 'import'))
+      )[0]
+      expect(queued).toBeDefined()
+      expect(receipt).toBeDefined()
+      expect(queued).toMatchObject({ access: 'hr', ownerId: hr })
+      expect(queued.data).toMatchObject({
+        status: 'ready',
+        personSourceId: mapped.personSourceId,
+        applicationSourceId: mapped.applicationSourceId,
+        participationState: 'withdrawn',
+        sourceVersion: mapped.sourceVersion,
+        sourceCreatedAt: '2026-10-25T13:00:00.000Z',
+        sourceUpdatedAt: '2026-11-01T12:00:00.000Z',
+        fieldProvenance: {
+          personSourceId: {
+            sourceName: preview.sourceName,
+            sourceVersion: mapped.sourceVersion,
+            sourceRow: mapped.sourceRow,
+            sourceColumn: 'Stable Person ID',
+          },
+          participationState: {
+            sourceColumn: 'Current participation state',
+          },
+        },
+      })
+      expect(receipt.data).toMatchObject({
+        status: 'queued for review',
+        mappingVersion: 3,
+        targetIds: [queued.id],
+        counts: { total: 1, reviewReady: 1, held: 0, open: 1 },
+      })
+      expect(
+        (await rehearsalDatabase().select().from(schema.records)).some(
+          (record) =>
+            ['application', 'contact', 'learning'].includes(record.kind),
+        ),
+      ).toBe(false)
+
+      const identicalRetry = await call(preview)
+      const retryBody = await identicalRetry.json()
+      expect(retryBody.receipt).toMatchObject({
+        id: firstBody.receipt.id,
+        batchId: firstBody.receipt.batchId,
+      })
+      expect(retryBody.summary).toMatchObject({
+        newlyQueued: 0,
+        existingRows: 1,
+        open: 1,
+      })
+
+      const appliedResponse = await call({
+        action: 'intake-review',
+        id: queued.id,
+        revision: queued.revision,
+        decision: 'apply',
+        reason: 'Synthetic HR staging review',
+      })
+      expect(appliedResponse.status).toBe(200)
+      const applied = await appliedResponse.json()
+      const rows = await rehearsalDatabase().select().from(schema.records)
+      const person = rows.find((record) => record.id === applied.personId)!
+      const application = rows.find((record) => record.id === applied.caseId)!
+      const learnerRows = rows.filter((record) => record.kind === 'learning')
+      expect(application).toMatchObject({
+        kind: 'application',
+        access: 'hr',
+        data: {
+          personSourceId: mapped.personSourceId,
+          applicationSourceId: mapped.applicationSourceId,
+          participationState: 'withdrawn',
+          sourceCreatedAt: '2026-10-25T13:00:00.000Z',
+          sourceUpdatedAt: '2026-11-01T12:00:00.000Z',
+        },
+      })
+      expect(person.access).toBe('hr')
+      expect(person.data).not.toHaveProperty('personSourceId')
+      expect(person.data).not.toHaveProperty('applicationSourceId')
+      expect(person.data).not.toHaveProperty('resumeUrl')
+      expect(learnerRows).toEqual([])
+      const reviewedReceipt = rows.find((record) => record.id === receipt.id)!
+      expect(reviewedReceipt.data).toMatchObject({
+        status: 'reviewed',
+        counts: {
+          accepted: 1,
+          open: 0,
+          reviewReady: 0,
+          held: 0,
+          failed: 0,
+        },
+        blockers: [],
+      })
+
+      const appliedRetry = await call(preview)
+      const appliedRetryBody = await appliedRetry.json()
+      expect(appliedRetryBody.receipt).toMatchObject({
+        id: receipt.id,
+        batchId: firstBody.receipt.batchId,
+        status: 'reviewed',
+      })
+      expect(appliedRetryBody.summary).toMatchObject({
+        alreadyApplied: 1,
+        accepted: 1,
+        open: 0,
+      })
+      expect(await counts()).toEqual([
+        { kind: 'application', count: 1 },
+        { kind: 'contact', count: 1 },
+        { kind: 'import', count: 1 },
+        { kind: 'intake', count: 1 },
+      ])
+
+      const changedSource = await call({
+        ...preview,
+        rows: [
+          {
+            ...mapped,
+            sourceVersion: 'staging-v2',
+            participationState: 'revoked',
+            sourceUpdatedAt: '2026-11-01T13:00:00Z',
+          },
+        ],
+      })
+      expect(changedSource.status).toBe(409)
+      const afterChangedSource = await rehearsalDatabase()
+        .select()
+        .from(schema.records)
+      expect(
+        afterChangedSource.find((record) => record.id === application.id),
+      ).toEqual(application)
+      expect(
+        afterChangedSource.filter((record) => record.kind === 'application'),
+      ).toHaveLength(1)
+      expect(
+        (
+          await pool.query<{ count: number }>(
+            "SELECT count(*)::integer AS count FROM crm_audit WHERE action='intake resolved source changed'",
+          )
+        ).rows[0].count,
+      ).toBe(1)
+    })
+
+    it('holds conflicting stable HR identities from apply and closes their idempotent receipt on exclusion', async () => {
+      context.user = { id: hr }
+      const [person] = await rehearsalDatabase()
+        .insert(schema.records)
+        .values({
+          kind: 'contact',
+          title: 'Candidate Beta',
+          ownerId: hr,
+          access: 'hr',
+          data: { email: 'candidate-beta-old@rehearsal.local' },
+        })
+        .returning()
+      await rehearsalDatabase()
+        .insert(schema.records)
+        .values({
+          kind: 'application',
+          title: 'Existing synthetic application',
+          ownerId: hr,
+          access: 'hr',
+          sourceKey: 'existing-application-source-key',
+          data: {
+            personId: person.id,
+            personSourceId: 'person-key-conflict-1',
+            applicationSourceId: 'application-key-conflict-1',
+            workflow: 'program',
+            stage: 'Applied',
+          },
+        })
+        .returning()
+      const preview = {
+        action: 'intake-preview',
+        sourceName: 'Restricted HR identity conflict fixture',
+        workflow: 'program',
+        batchIndex: 1,
+        batchCount: 1,
+        mappingVersion: 3,
+        rows: [
+          {
+            ...next,
+            sourceId: 'new-source-row-conflict-1',
+            sourceVersion: 'staging-v1',
+            personSourceId: 'person-key-conflict-1',
+            applicationSourceId: 'application-key-conflict-1',
+            participationState: 'unknown',
+            name: 'Candidate Beta',
+            email: 'candidate-beta@rehearsal.local',
+          },
+        ],
+      }
+      const first = await call(preview)
+      expect(first.status).toBe(200)
+      const firstBody = await first.json()
+      expect(firstBody.summary).toMatchObject({
+        held: 1,
+        reviewReady: 0,
+        open: 1,
+      })
+      const queued = (
+        await rehearsalDatabase()
+          .select()
+          .from(schema.records)
+          .where(eq(schema.records.kind, 'intake'))
+      )[0]
+      const receipt = (
+        await rehearsalDatabase()
+          .select()
+          .from(schema.records)
+          .where(eq(schema.records.kind, 'import'))
+      )[0]
+      expect(queued.data).toMatchObject({
+        status: 'conflict',
+        identityHold: true,
+      })
+      const identicalRetry = await call(preview)
+      const retryBody = await identicalRetry.json()
+      expect(retryBody.receipt).toMatchObject({
+        id: firstBody.receipt.id,
+        batchId: firstBody.receipt.batchId,
+      })
+      expect((await review(queued, { personId: person.id })).status).toBe(409)
+      expect((await review(queued, { decision: 'exclude' })).status).toBe(200)
+      const reviewedReceipt = (
+        await rehearsalDatabase()
+          .select()
+          .from(schema.records)
+          .where(eq(schema.records.id, receipt.id))
+      )[0]
+      expect(reviewedReceipt.data).toMatchObject({
+        status: 'reviewed',
+        counts: { held: 0, excluded: 1, open: 0 },
+        blockers: [],
+      })
+      expect(
+        await rehearsalDatabase()
+          .select()
+          .from(schema.records)
+          .where(eq(schema.records.kind, 'application')),
+      ).toHaveLength(1)
+      const excludedRetry = await call(preview)
+      expect((await excludedRetry.json()).receipt.id).toBe(receipt.id)
+    })
+
+    it('holds PENDING RECONCILIATION instead of treating it as a stable identity', async () => {
+      context.user = { id: hr }
+      const preview = {
+        action: 'intake-preview',
+        sourceName: 'Restricted HR pending identity fixture',
+        workflow: 'program',
+        batchIndex: 1,
+        batchCount: 1,
+        mappingVersion: 3,
+        rows: [
+          {
+            ...next,
+            sourceId: 'pending-identity-row-1',
+            sourceVersion: 'staging-v1',
+            personSourceId: '  pending   reconciliation ',
+            applicationSourceId: 'pending-application-key-1',
+            participationState: 'unknown',
+            name: 'Candidate Placeholder',
+            email: 'candidate-placeholder@rehearsal.local',
+          },
+        ],
+      }
+      const first = await call(preview)
+      expect(first.status).toBe(200)
+      const firstBody = await first.json()
+      expect(firstBody.summary).toMatchObject({
+        held: 1,
+        reviewReady: 0,
+        open: 1,
+      })
+      const queued = (
+        await rehearsalDatabase()
+          .select()
+          .from(schema.records)
+          .where(eq(schema.records.kind, 'intake'))
+      )[0]
+      expect(queued.data).toMatchObject({
+        status: 'conflict',
+        identityHold: true,
+        personSourceId: 'pending   reconciliation',
+      })
+      expect(queued.data.identityHoldReason).toContain(
+        'PENDING RECONCILIATION is a placeholder',
+      )
+      expect((await review(queued)).status).toBe(409)
+      expect((await review(queued, { decision: 'exclude' })).status).toBe(200)
+      const receipt = (
+        await rehearsalDatabase()
+          .select()
+          .from(schema.records)
+          .where(eq(schema.records.kind, 'import'))
+      )[0]
+      expect(receipt.data).toMatchObject({
+        status: 'reviewed',
+        counts: { held: 0, excluded: 1, open: 0 },
+        blockers: [],
+      })
+      const retry = await call(preview)
+      expect((await retry.json()).receipt).toMatchObject({
+        id: firstBody.receipt.id,
+        batchId: firstBody.receipt.batchId,
+      })
+      expect(
+        await rehearsalDatabase()
+          .select()
+          .from(schema.records)
+          .where(eq(schema.records.kind, 'application')),
+      ).toEqual([])
     })
 
     it('applies a reviewed row atomically and serializes concurrent repeat requests to one person and case', async () => {
@@ -1002,9 +1377,12 @@ describe.skipIf(!enabled)(
         rows: [mapped],
       }
       expect((await call(preview)).status).toBe(200)
-      const original = (
-        await rehearsalDatabase().select().from(schema.records)
-      )[0]
+      const previewRows = () =>
+        rehearsalDatabase()
+          .select()
+          .from(schema.records)
+          .where(eq(schema.records.kind, 'intake'))
+      const original = (await previewRows())[0]
       const auditBefore = (
         await pool.query<{ count: number }>(
           'SELECT count(*)::integer AS count FROM crm_audit',
@@ -1023,9 +1401,7 @@ describe.skipIf(!enabled)(
           })
         ).status,
       ).toBe(400)
-      expect(
-        (await rehearsalDatabase().select().from(schema.records))[0],
-      ).toEqual(original)
+      expect((await previewRows())[0]).toEqual(original)
       expect(
         (
           await pool.query<{ count: number }>(
@@ -1038,7 +1414,7 @@ describe.skipIf(!enabled)(
         call({ ...preview, rows: [changed] }),
       ])
       expect(concurrent.map((response) => response.status)).toEqual([200, 200])
-      const held = (await rehearsalDatabase().select().from(schema.records))[0]
+      const held = (await previewRows())[0]
       expect(held.id).toBe(original.id)
       expect(held.revision).toBe(original.revision + 1)
       expect(held.data).toMatchObject({
@@ -1054,7 +1430,7 @@ describe.skipIf(!enabled)(
             'SELECT count(*)::integer AS count FROM crm_audit',
           )
         ).rows[0].count,
-      ).toBe(auditBefore + 1)
+      ).toBe(auditBefore + 2)
       expect((await review(original, { decision: 'exclude' })).status).toBe(409)
       const person = await save('contact', {
         name: 'Synthetic existing person',
@@ -1085,6 +1461,7 @@ describe.skipIf(!enabled)(
       ).toEqual(excluded)
       expect(await counts()).toEqual([
         { kind: 'contact', count: 1 },
+        { kind: 'import', count: 2 },
         { kind: 'intake', count: 1 },
       ])
     })
