@@ -194,7 +194,56 @@ const request = (body?: unknown, suffix = '') =>
         }
       : undefined,
   )
-const call = (body: unknown) => handler(request(body))
+const callRaw = (body: unknown) => handler(request(body))
+const call = (body: unknown) => {
+  if (!body || typeof body !== 'object') return callRaw(body)
+  const input = body as Record<string, unknown>
+  if (
+    input.action !== 'intake-preview' ||
+    !['program', 'sales'].includes(String(input.workflow || '')) ||
+    !Array.isArray(input.rows)
+  )
+    return callRaw(body)
+  const rows = (input.rows as Record<string, unknown>[]).map((row, index) => {
+    if (row.hrFieldProvenance) return row
+    const fields = [
+      'name',
+      'email',
+      'applicantId',
+      'program',
+      'cohort',
+      'resumeUrl',
+      'onboardingStatus',
+    ]
+    const hrFieldProvenance = Object.fromEntries(
+      fields.flatMap((field) =>
+        String(row[field] ?? '').trim()
+          ? [
+              [
+                field,
+                {
+                  sourceId: String(row.sourceId || ''),
+                  sourceUrl: 'https://forms.invalid/synthetic-source',
+                  sourceTab: 'Synthetic fixture',
+                  sourceRow: String(row.sourceRow || index + 1),
+                  sourceFieldOrBasis:
+                    String(
+                      (
+                        row.sourceFieldColumns as
+                          Record<string, unknown> | undefined
+                      )?.[field] || '',
+                    ) || 'Synthetic test source value',
+                  sourceValueApplied: String(row[field]),
+                },
+              ],
+            ]
+          : [],
+      ),
+    )
+    return { ...row, hrFieldProvenance }
+  })
+  return callRaw({ ...input, rows })
+}
 const save = (record: RecordEnvelope) =>
   call({ action: 'foundation-save', record })
 const previewAndAssign = async (
@@ -2093,4 +2142,98 @@ it('reuses the same source row when a reopened import dialog supplies different 
   expect(current.data.nextAction).toBe(pending.nextAction)
   expect(current.data.nextDue).toBe(new Date(pending.nextDue).toISOString())
   expect(fixture.audit).toHaveLength(originalAuditCount)
+})
+
+it('stores exact restricted HR source locations and derived-value basis without duplicating a retried preview', async () => {
+  const sourceId = 'fictional-applicant-001'
+  const mapped = {
+    ...pending,
+    sourceId,
+    sourceVersion: 'fictional-source-v1',
+    sourceUrl: 'https://drive.google.com/file/d/fictional-primary-source/view',
+    sourceRow: 'primary-row-1',
+    name: 'Rhea Sample',
+    email: 'rhea@example.invalid',
+    cohort: 'Fictional Fall 2026',
+  }
+  const source = 'https://docs.google.com/spreadsheets/d/fictional-source/edit'
+  const hrFieldProvenance = {
+    name: {
+      sourceId,
+      sourceUrl: source,
+      sourceTab: 'Fictional Applicants',
+      sourceRow: '42',
+      sourceFieldOrBasis: 'Candidate',
+      sourceValueApplied: 'Rhea Sample',
+    },
+    email: {
+      sourceId,
+      sourceUrl: source,
+      sourceTab: 'Fictional Applicants',
+      sourceRow: '42',
+      sourceFieldOrBasis: 'Email',
+      sourceValueApplied: 'rhea@example.invalid',
+    },
+    cohort: {
+      sourceId,
+      sourceUrl: source,
+      sourceTab: 'Fall Applicants',
+      sourceRow: '42',
+      sourceFieldOrBasis: 'Fall Applicants tab / term',
+      sourceValueApplied: 'Fictional Fall 2026',
+    },
+  }
+  const preview = {
+    action: 'intake-preview',
+    sourceName: 'Fictional HR provenance regression',
+    workflow: 'program',
+    rows: [{ ...mapped, hrFieldProvenance }],
+  }
+  const first = await call(preview)
+  expect(first.status).toBe(200)
+  const firstBody = await first.json()
+  const queued = fixture.records.find((record) => record.kind === 'intake')!
+  expect(queued.access).toBe('hr')
+  expect(queued.data.fieldProvenance).toMatchObject({
+    name: {
+      sourceUrl: source,
+      sourceTab: 'Fictional Applicants',
+      sourceRow: '42',
+      sourceColumn: 'Candidate',
+      sourceValueApplied: 'Rhea Sample',
+    },
+    cohort: {
+      sourceUrl: source,
+      sourceTab: 'Fall Applicants',
+      sourceRow: '42',
+      sourceBasis: 'Fall Applicants tab / term',
+      sourceValueApplied: 'Fictional Fall 2026',
+    },
+  })
+  expect(
+    Object.values(
+      queued.data.fieldProvenance as Record<string, Record<string, unknown>>,
+    ).every((field) => !!field.sourceColumn || !!field.sourceBasis),
+  ).toBe(true)
+  const retry = await call(preview)
+  const retryBody = await retry.json()
+  expect(retry.status).toBe(200)
+  expect(retryBody.receipt.batchId).toBe(firstBody.receipt.batchId)
+  expect(retryBody.summary).toMatchObject({
+    total: 1,
+    existingRows: 1,
+    newlyQueued: 0,
+  })
+  expect(
+    fixture.records.filter((record) => record.kind === 'intake'),
+  ).toHaveLength(1)
+  expect(
+    (
+      await callRaw({
+        ...preview,
+        sourceName: 'Fictional HR provenance missing sidecar',
+        rows: [mapped],
+      })
+    ).status,
+  ).toBe(400)
 })

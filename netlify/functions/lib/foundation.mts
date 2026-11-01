@@ -173,7 +173,13 @@ function permission(d: RecordData, old?: Row) {
 }
 function provenance(d: RecordData) {
   const out: RecordData = {}
-  for (const k of ['sourceName', 'sourceId', 'sourceVersion', 'sourceRow'])
+  for (const k of [
+    'sourceName',
+    'sourceId',
+    'sourceVersion',
+    'sourceRow',
+    'sourceTab',
+  ])
     if (d[k] != null) out[k] = text(String(d[k]), 300)
   for (const k of ['sourceCreatedAt', 'sourceUpdatedAt']) {
     if (d[k] == null || d[k] === '') continue
@@ -280,7 +286,122 @@ const applicantSourceKeys = [
   'onboardingStatus',
   'participationState',
   'fieldProvenance',
+  'hrFieldProvenance',
 ] as const
+const hrProvenanceFields = new Set([
+  'name',
+  'email',
+  'applicantId',
+  'personIdAsRecorded',
+  'program',
+  'cohort',
+  'resumeUrl',
+  'onboardingStatus',
+  'sourceTimestamp',
+])
+const hrSourceValueFields = [
+  'name',
+  'email',
+  'applicantId',
+  'program',
+  'cohort',
+  'resumeUrl',
+  'onboardingStatus',
+] as const
+const directHrColumnLabels = new Set([
+  'Candidate',
+  'Full Legal Name (column C)',
+  'Email — Private',
+  'Email',
+  'Applicant ID',
+  'Person ID',
+  'Form Resume Link',
+  'Resume or CV Upload (T)',
+  'Onboarding Status',
+  'Timestamp',
+])
+function restrictedFieldProvenance(
+  raw: RecordData,
+  sourceName: string,
+  sourceId: string,
+): RecordData {
+  const input = raw.hrFieldProvenance
+  check(
+    input && typeof input === 'object' && !Array.isArray(input),
+    'Restricted applicant imports require field-level HR provenance.',
+  )
+  const entries = Object.entries(input as Record<string, unknown>)
+  check(
+    entries.length > 0 && entries.length <= 16,
+    'HR provenance field count is invalid.',
+  )
+  const result: RecordData = {}
+  for (const [field, value] of entries) {
+    check(
+      hrProvenanceFields.has(field),
+      'HR provenance contains an unsupported field.',
+    )
+    check(
+      value && typeof value === 'object' && !Array.isArray(value),
+      'HR provenance entry is invalid.',
+    )
+    const entry = value as Record<string, unknown>
+    const entrySourceId = String(entry.sourceId ?? '')
+    const sourceUrl = text(entry.sourceUrl, 2000)
+    const sourceTab = text(entry.sourceTab, 300)
+    const sourceRow = text(entry.sourceRow, 300)
+    const sourceFieldOrBasis = text(entry.sourceFieldOrBasis, 300)
+    const sourceValueApplied =
+      field === 'email'
+        ? email(entry.sourceValueApplied)
+        : text(entry.sourceValueApplied, 10000)
+    check(
+      entrySourceId === sourceId &&
+        https(sourceUrl) &&
+        sourceTab &&
+        sourceRow &&
+        sourceFieldOrBasis &&
+        sourceValueApplied,
+      'HR provenance must match the exact source ID and include its source location and applied value.',
+    )
+    if ((hrSourceValueFields as readonly string[]).includes(field)) {
+      const applied = text(raw[field], 10000)
+      const expected = sourceValueApplied
+      check(
+        field === 'email'
+          ? applied.toLowerCase() === expected.toLowerCase()
+          : applied === expected,
+        `HR provenance for ${field} does not match the preview value.`,
+      )
+    }
+    result[field] = {
+      sourceName,
+      sourceId,
+      sourceVersion: text(raw.sourceVersion, 300),
+      sourceUrl,
+      sourceTab,
+      sourceRow,
+      sourceFieldOrBasis,
+      ...(directHrColumnLabels.has(sourceFieldOrBasis)
+        ? { sourceColumn: sourceFieldOrBasis }
+        : { sourceBasis: sourceFieldOrBasis }),
+      sourceValueApplied,
+    }
+  }
+  for (const field of ['name', 'email'])
+    check(
+      result[field],
+      `HR provenance is missing ${field} for this source ID.`,
+    )
+  for (const field of hrSourceValueFields) {
+    if (text(raw[field], 10000))
+      check(
+        result[field],
+        `HR provenance is missing ${field} for this source ID.`,
+      )
+  }
+  return result
+}
 const organizationSourceKeys = [
   'sourceName',
   'sourceId',
@@ -332,7 +453,7 @@ function intakeSourceFingerprint(
   ].sort()
   const normalized = keys.map((key) => {
     let value =
-      key === 'fieldProvenance'
+      key === 'fieldProvenance' || key === 'hrFieldProvenance'
         ? JSON.stringify(data[key] || {})
         : typeof data[key] === 'string'
           ? data[key].trim()
@@ -359,7 +480,9 @@ function intakeSourceData(
   const sourceFields = [
     ...intakeSourceKeys,
     ...(hr
-      ? applicantSourceKeys.filter((key) => key !== 'fieldProvenance')
+      ? applicantSourceKeys.filter(
+          (key) => key !== 'fieldProvenance' && key !== 'hrFieldProvenance',
+        )
       : []),
   ]
   const fieldProvenance = Object.fromEntries(
@@ -377,12 +500,20 @@ function intakeSourceData(
             sourceUrl: source.sourceUrl || '',
             sourceCreatedAt: source.sourceCreatedAt || '',
             sourceUpdatedAt: source.sourceUpdatedAt || '',
-            sourceColumn: column,
+            ...(column
+              ? { sourceColumn: column }
+              : { sourceBasis: 'Entered or derived during CRM preview' }),
           },
         ],
       ]
     }),
   )
+  const savedFieldProvenance = hr
+    ? {
+        ...fieldProvenance,
+        ...restrictedFieldProvenance(raw, sourceName, sourceId),
+      }
+    : fieldProvenance
   return {
     ...source,
     workflow,
@@ -391,8 +522,10 @@ function intakeSourceData(
     organization: text(raw.organization, 300),
     contactPermission: permission(raw),
     permissionEvidence: text(raw.permissionEvidence, 1000),
-    ...(hr ? applicantDetails({ ...raw, fieldProvenance }) : {}),
-    ...(hr ? { fieldProvenance } : {}),
+    ...(hr
+      ? applicantDetails({ ...raw, fieldProvenance: savedFieldProvenance })
+      : {}),
+    ...(hr ? { fieldProvenance: savedFieldProvenance } : {}),
     ...accountable(raw),
   }
 }

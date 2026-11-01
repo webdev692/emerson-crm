@@ -262,7 +262,56 @@ function request(body?: unknown, suffix = '') {
       : undefined,
   )
 }
-const call = (body: unknown) => handler(request(body))
+const callRaw = (body: unknown) => handler(request(body))
+const call = (body: unknown) => {
+  if (!body || typeof body !== 'object') return callRaw(body)
+  const input = body as Record<string, unknown>
+  if (
+    input.action !== 'intake-preview' ||
+    !['program', 'sales'].includes(String(input.workflow || '')) ||
+    !Array.isArray(input.rows)
+  )
+    return callRaw(body)
+  const rows = (input.rows as Record<string, unknown>[]).map((row, index) => {
+    if (row.hrFieldProvenance) return row
+    const fields = [
+      'name',
+      'email',
+      'applicantId',
+      'program',
+      'cohort',
+      'resumeUrl',
+      'onboardingStatus',
+    ]
+    const hrFieldProvenance = Object.fromEntries(
+      fields.flatMap((field) =>
+        String(row[field] ?? '').trim()
+          ? [
+              [
+                field,
+                {
+                  sourceId: String(row.sourceId || ''),
+                  sourceUrl: 'https://forms.invalid/synthetic-source',
+                  sourceTab: 'Synthetic fixture',
+                  sourceRow: String(row.sourceRow || index + 1),
+                  sourceFieldOrBasis:
+                    String(
+                      (
+                        row.sourceFieldColumns as
+                          Record<string, unknown> | undefined
+                      )?.[field] || '',
+                    ) || 'Synthetic test source value',
+                  sourceValueApplied: String(row[field]),
+                },
+              ],
+            ]
+          : [],
+      ),
+    )
+    return { ...row, hrFieldProvenance }
+  })
+  return callRaw({ ...input, rows })
+}
 async function save(
   kind: string,
   data: RecordData,

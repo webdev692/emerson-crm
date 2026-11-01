@@ -22,6 +22,11 @@ import {
   learningProgress,
   isHrWorkflow,
 } from '../lib/foundation'
+import {
+  attachHrPreviewFieldProvenance,
+  parseHrPreviewFieldProvenance,
+  type HrPreviewFieldProvenance,
+} from '../lib/intake-provenance'
 
 export type FoundationRecord = {
   id: string
@@ -1933,6 +1938,9 @@ function IntakeMapper({
   onPartial: (receipt: IntakeBatchReceipt) => Promise<void>
 }) {
   const [csv, setCsv] = useState<string[][]>([])
+  const [hrProvenance, setHrProvenance] = useState<
+    HrPreviewFieldProvenance[] | null
+  >(null)
   const [mapping, setMapping] = useState<Record<string, string>>({})
   const [sourceName, setSourceName] = useState(
     assignment?.data.sourceName || '',
@@ -1949,6 +1957,8 @@ function IntakeMapper({
   const [partialReceipt, setPartialReceipt] =
     useState<IntakeBatchReceipt | null>(null)
   const hr = !assignment && (member.role === 'owner' || !!member.hr)
+  const needsHrProvenance =
+    hr && batchType === 'contacts' && isHrWorkflow(workflow)
   const headers = csv[0] || []
   const mappedFields =
     batchType === 'organizations'
@@ -1988,6 +1998,10 @@ function IntakeMapper({
                   ? 'Map the stable source row ID, person name and email columns.'
                   : 'Map the stable source row ID, source name and required batch fields.',
               )
+            if (needsHrProvenance && !hrProvenance)
+              throw Error(
+                'Choose the matching HR provenance CSV before previewing applicants.',
+              )
             if (
               batchType === 'resources' &&
               mapping.body === undefined &&
@@ -2004,7 +2018,7 @@ function IntakeMapper({
               throw Error(
                 'Every row needs a unique, stable source ID. Reconcile repeated or blank IDs in the source before importing.',
               )
-            const rows = csv.slice(1).map((row) => {
+            const mappedRows = csv.slice(1).map((row) => {
               const mapped = Object.fromEntries(
                 mappedFields.map(([key]) => [
                   key,
@@ -2040,6 +2054,9 @@ function IntakeMapper({
                 sourceFieldColumns,
               }
             })
+            const rows = needsHrProvenance
+              ? attachHrPreviewFieldProvenance(mappedRows, hrProvenance!)
+              : mappedRows
             const batches = intakeBatches(
               rows,
               sourceName,
@@ -2181,7 +2198,10 @@ function IntakeMapper({
           offset; local source dates are never inferred. Applicant details are
           mapped only into HR-restricted applicant workflows. Source onboarding
           status describes the source record; it does not grant HR clearance,
-          learner enrollment, staff access or training completion.
+          learner enrollment, staff access or training completion. Restricted
+          applicant previews require the matching HR provenance CSV. It is
+          joined by exact source ID and field and stays within the HR-restricted
+          preview rows.
         </p>
         {error && (
           <p className="form-error" role="alert">
@@ -2199,6 +2219,7 @@ function IntakeMapper({
                 setError('')
                 setCsv([])
                 setMapping({})
+                setHrProvenance(null)
                 const file = e.target.files?.[0]
                 if (!file) return
                 try {
@@ -2224,6 +2245,43 @@ function IntakeMapper({
               }}
             />
           </label>
+          {needsHrProvenance && (
+            <label className="foundation-field foundation-full">
+              <span>HR field provenance CSV *</span>
+              <input
+                type="file"
+                accept=".csv,text/csv"
+                required={!hrProvenance}
+                onChange={async (e) => {
+                  setError('')
+                  setHrProvenance(null)
+                  const file = e.target.files?.[0]
+                  if (!file) return
+                  try {
+                    if (file.size > intakeCsvByteLimit)
+                      throw Error(
+                        'Choose an HR provenance CSV smaller than 20 MB.',
+                      )
+                    setHrProvenance(
+                      parseHrPreviewFieldProvenance(
+                        parseIntakeCSV(await file.text()),
+                      ),
+                    )
+                  } catch (err) {
+                    setError(
+                      err instanceof Error
+                        ? err.message
+                        : 'Could not read the HR provenance CSV.',
+                    )
+                  }
+                }}
+              />
+              <small>
+                Exact source IDs and fields are checked against the uploaded
+                applicant batch.
+              </small>
+            </label>
+          )}
           <label className="foundation-field">
             <span>Source name / version *</span>
             <input
@@ -2435,9 +2493,59 @@ function IntakeDecision({
           <div key={key}>
             <dt>{human(key)}</dt>
             <dd>
-              {typeof value === 'object'
-                ? JSON.stringify(value)
-                : String(value ?? '')}
+              {key === 'fieldProvenance' &&
+              value &&
+              typeof value === 'object' &&
+              !Array.isArray(value) ? (
+                <ul>
+                  {Object.entries(value as Record<string, unknown>).map(
+                    ([field, entry]) => {
+                      const source =
+                        entry &&
+                        typeof entry === 'object' &&
+                        !Array.isArray(entry)
+                          ? (entry as Record<string, unknown>)
+                          : {}
+                      const location = [source.sourceTab, source.sourceRow]
+                        .filter(Boolean)
+                        .join(' · ')
+                      const basis = source.sourceColumn
+                        ? `Column: ${String(source.sourceColumn)}`
+                        : source.sourceBasis
+                          ? `Basis: ${String(source.sourceBasis)}`
+                          : ''
+                      return (
+                        <li key={field}>
+                          <strong>{human(field)}</strong>
+                          {Boolean(source.sourceUrl) && (
+                            <>
+                              {' · '}
+                              <a
+                                href={String(source.sourceUrl)}
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                Source
+                              </a>
+                            </>
+                          )}
+                          {location && ` · ${location}`}
+                          {basis && ` · ${basis}`}
+                          {source.sourceValueApplied != null && (
+                            <div>
+                              Applied value: {String(source.sourceValueApplied)}
+                            </div>
+                          )}
+                        </li>
+                      )
+                    },
+                  )}
+                </ul>
+              ) : typeof value === 'object' ? (
+                JSON.stringify(value)
+              ) : (
+                String(value ?? '')
+              )}
             </dd>
           </div>
         ))}
