@@ -97,6 +97,11 @@ export interface RecordData extends JsonObject {
   sourceId?: string
   sourceName?: string
   sourceUrl?: string
+  batchType?: string
+  batchAssignmentId?: string
+  batchIndex?: number
+  batchCount?: number
+  mappingVersion?: number
   sourcedBy?: string
   stage?: string
   stageEvidence?: string
@@ -112,9 +117,16 @@ export interface RecordData extends JsonObject {
   worksheetUrl?: string
   writtenAcceptance?: string
   applicantId?: string
+  personSourceId?: string
+  applicationSourceId?: string
   program?: string
   cohort?: string
   onboardingStatus?: string
+  participationState?: string
+  sourceCreatedAt?: string
+  sourceUpdatedAt?: string
+  fieldProvenance?: JsonObject
+  sourceFieldColumns?: JsonObject
   registrationStatus?: string
   className?: string
   sourceVersion?: string
@@ -167,10 +179,21 @@ export interface RecordEnvelope {
 export type FoundationRequest =
   | { action: 'foundation-save'; record: RecordEnvelope }
   | {
+      action: 'intake-assignment-create'
+      assigneeId: string
+      receiptId: string
+    }
+  | {
       action: 'intake-preview'
       sourceName: string
-      workflow: string
+      workflow?: string
+      batchType?: 'contacts' | 'organizations' | 'resources'
+      assignmentId?: string
+      sourceVersion?: string
       rows: RecordData[]
+      batchIndex?: number
+      batchCount?: number
+      mappingVersion?: number
     }
   | {
       action: 'intake-review'
@@ -179,4 +202,5 @@ export type FoundationRequest =
       decision: string
       reason: string
       personId?: string
+      assignmentId?: string
     }

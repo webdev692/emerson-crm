@@ -197,6 +197,28 @@ const request = (body?: unknown, suffix = '') =>
 const call = (body: unknown) => handler(request(body))
 const save = (record: RecordEnvelope) =>
   call({ action: 'foundation-save', record })
+const previewAndAssign = async (
+  previewRequest: unknown,
+  assigneeId: string,
+) => {
+  const previewResponse = await call(previewRequest)
+  const previewBody = await previewResponse.json()
+  if (previewResponse.status !== 200 || !previewBody.receipt?.id)
+    throw new Error(
+      `Synthetic manager preview failed (${previewResponse.status}): ${JSON.stringify(previewBody)}`,
+    )
+  const assignmentResponse = await call({
+    action: 'intake-assignment-create',
+    assigneeId,
+    receiptId: previewBody.receipt.id,
+  })
+  const assignmentBody = await assignmentResponse.json()
+  if (assignmentResponse.status !== 200)
+    throw new Error(
+      `Synthetic import assignment failed (${assignmentResponse.status}): ${JSON.stringify(assignmentBody)}`,
+    )
+  return { previewBody, assignmentResponse, assignmentBody }
+}
 beforeEach(() => {
   vi.clearAllMocks()
   fixture.user = { id: 'staff-owner' }
@@ -486,7 +508,8 @@ it('classifies test and invalid intake, repeats preview safely, and never applie
     'test',
     'invalid',
   ])
-  expect((await call(preview)).status).toBe(200)
+  const assignedPreview = await call(preview)
+  expect(assignedPreview.status, await assignedPreview.clone().text()).toBe(200)
   expect(fixture.records.filter((r) => r.kind === 'intake')).toHaveLength(2)
   expect(
     (
@@ -541,9 +564,33 @@ it('enforces review-only duplicate linking and atomic repeat-safe application', 
         email: 'person@example.invalid',
         workflow: 'class',
         status: 'duplicate',
+        batchReceiptId: 'batch-receipt',
         ...pending,
       },
       { sourceKey: 'stable-key' },
+    ),
+    row(
+      'import',
+      'batch-receipt',
+      {
+        status: 'queued for review',
+        targetIds: ['queue'],
+        counts: {
+          total: 1,
+          newlyQueued: 1,
+          existingRows: 0,
+          accepted: 0,
+          failed: 0,
+          excluded: 0,
+          open: 1,
+          reviewReady: 0,
+          held: 1,
+          alreadyApplied: 0,
+          alreadyExcluded: 0,
+        },
+        blockers: [{ targetId: 'queue', status: 'duplicate' }],
+      },
+      { sourceKey: 'receipt-key' },
     ),
   ]
   const decision = {
@@ -554,7 +601,7 @@ it('enforces review-only duplicate linking and atomic repeat-safe application', 
     reason: 'Verified exact source email',
   }
   expect((await call(decision)).status).toBe(409)
-  expect(fixture.records).toHaveLength(2)
+  expect(fixture.records).toHaveLength(3)
   expect((await call({ ...decision, personId: 'person' })).status).toBe(200)
   expect(fixture.records.filter((r) => r.kind === 'contact')).toHaveLength(1)
   expect(
@@ -563,6 +610,13 @@ it('enforces review-only duplicate linking and atomic repeat-safe application', 
     personId: 'person',
     suppressed: true,
     contactPermission: 'Do not contact',
+  })
+  expect(
+    fixture.records.find((r) => r.id === 'batch-receipt')?.data,
+  ).toMatchObject({
+    status: 'reviewed',
+    counts: { accepted: 1, open: 0, reviewReady: 0, held: 0 },
+    lastReviewerId: 'staff-owner',
   })
   expect((await call({ ...decision, personId: 'person' })).status).toBe(409)
   expect(fixture.records.filter((r) => r.kind === 'engagement')).toHaveLength(1)
@@ -799,13 +853,18 @@ it('keeps organizations, provenance, and no-contact identities created from appl
 it('preserves applicant details only in restricted preview rows and keeps test rows held', async () => {
   const details = {
     applicantId: 'applicant-synthetic-1',
+    personSourceId: 'person-synthetic-1',
+    applicationSourceId: 'application-synthetic-1',
     program: 'Synthetic program',
     cohort: 'Synthetic cohort',
     resumeUrl: 'https://assets.invalid/restricted-resume',
     onboardingStatus: 'Awaiting verification',
+    participationState: 'withdrawn',
     sourceVersion: 'revision-2',
     sourceRow: 'original-row-7',
     sourceUrl: 'https://forms.invalid/restricted-source',
+    sourceCreatedAt: '2026-10-21T13:00:00Z',
+    sourceUpdatedAt: '2026-10-28T16:30:00-04:00',
   }
   const mapped = {
     ...pending,
@@ -813,6 +872,13 @@ it('preserves applicant details only in restricted preview rows and keeps test r
     sourceId: 'restricted-detail-1',
     name: 'Synthetic applicant',
     email: 'applicant@review.invalid',
+    sourceFieldColumns: {
+      applicantId: 'Application ID',
+      personSourceId: 'Person ID',
+      applicationSourceId: 'Application ID',
+      participationState: 'Current status',
+      sourceUpdatedAt: 'Updated at',
+    },
   }
   const preview = await call({
     action: 'intake-preview',
@@ -824,7 +890,40 @@ it('preserves applicant details only in restricted preview rows and keeps test r
   const queue = fixture.records.find((r) => r.kind === 'intake')!
   expect(queue).toBeDefined()
   expect(queue.access).toBe('hr')
-  expect(queue.data).toMatchObject({ ...details, status: 'test' })
+  expect(queue.data).toMatchObject({
+    ...details,
+    status: 'test',
+    sourceCreatedAt: '2026-10-21T13:00:00.000Z',
+    sourceUpdatedAt: '2026-10-28T20:30:00.000Z',
+    fieldProvenance: {
+      personSourceId: expect.objectContaining({
+        sourceName: 'Synthetic applicant details',
+        sourceId: 'restricted-detail-1',
+        sourceColumn: 'Person ID',
+      }),
+      sourceUpdatedAt: expect.objectContaining({
+        sourceColumn: 'Updated at',
+        sourceUpdatedAt: '2026-10-28T20:30:00.000Z',
+      }),
+    },
+  })
+  const responseBody = await preview.json()
+  expect(responseBody.summary).toMatchObject({
+    total: 1,
+    newlyQueued: 1,
+    existingRows: 0,
+    held: 1,
+  })
+  const batchReceipt = fixture.records.find((r) => r.kind === 'import')!
+  expect(batchReceipt).toMatchObject({
+    access: 'hr',
+    data: {
+      status: 'queued for review',
+      mappingVersion: 1,
+      operatorId: 'staff-owner',
+      targetIds: [queue.id],
+    },
+  })
   expect(
     (
       await call({
@@ -854,6 +953,10 @@ it('preserves applicant details only in restricted preview rows and keeps test r
     'cohort',
     'resumeUrl',
     'onboardingStatus',
+    'personSourceId',
+    'applicationSourceId',
+    'participationState',
+    'fieldProvenance',
   ])
     expect(sharedQueue.data).not.toHaveProperty(key)
   expect(sharedQueue.data).toMatchObject({
@@ -869,6 +972,762 @@ it('preserves applicant details only in restricted preview rows and keeps test r
   expect(body).not.toContain(queue.id)
   expect(body).not.toContain(details.resumeUrl)
   expect(body).not.toContain(details.applicantId)
+  expect(body).not.toContain('Person ID')
+  expect(body).not.toContain(batchReceipt.id)
+})
+
+it('holds stable HR identity conflicts and persists idempotent batch receipts', async () => {
+  fixture.records = [
+    row(
+      'contact',
+      'prior-person',
+      { name: 'Casey Emerson', email: 'casey.old@emerson.org' },
+      { access: 'hr' },
+    ),
+    row(
+      'application',
+      'prior-application',
+      {
+        personId: 'prior-person',
+        personSourceId: 'HR-PERSON-42',
+        applicationSourceId: 'HR-APP-1',
+      },
+      { access: 'hr' },
+    ),
+  ]
+  const preview = {
+    action: 'intake-preview',
+    sourceName: 'Authoritative HR roster v3',
+    workflow: 'program',
+    batchIndex: 1,
+    batchCount: 1,
+    mappingVersion: 2,
+    rows: [
+      {
+        ...pending,
+        sourceId: 'source-row-42',
+        sourceVersion: 'v3',
+        personSourceId: 'HR-PERSON-42',
+        applicationSourceId: 'HR-APP-2',
+        name: 'Casey Emerson',
+        email: 'casey.new@emerson.org',
+      },
+    ],
+  }
+  const first = await call(preview)
+  expect(first.status).toBe(200)
+  const firstBody = await first.json()
+  const intake = fixture.records.find((r) => r.kind === 'intake')!
+  expect(intake.data).toMatchObject({
+    status: 'conflict',
+    identityHold: true,
+    personSourceId: 'HR-PERSON-42',
+  })
+  expect(firstBody.summary).toMatchObject({
+    newlyQueued: 1,
+    reviewReady: 0,
+    held: 1,
+  })
+  const firstReceipt = fixture.records.find((r) => r.kind === 'import')!
+  expect(firstReceipt.data).toMatchObject({
+    mappingVersion: 2,
+    batchIndex: 1,
+    batchCount: 1,
+    targetIds: [intake.id],
+  })
+  const second = await call(preview)
+  expect(second.status).toBe(200)
+  const secondBody = await second.json()
+  expect(secondBody.receipt.id).toBe(firstBody.receipt.id)
+  expect(fixture.records.filter((r) => r.kind === 'import')).toHaveLength(1)
+  expect(fixture.records.filter((r) => r.kind === 'intake')).toHaveLength(1)
+})
+
+it('limits an assigned contact batch to its operator and reconciles created vs matched receipts', async () => {
+  fixture.members = [
+    member('owner', false, 'staff-owner'),
+    member('contributor', false, 'intern-1'),
+    member('contributor', false, 'outsider'),
+  ]
+  const managerPreview = {
+    action: 'intake-preview',
+    batchType: 'contacts',
+    sourceName: 'Synthetic bounded contact batch',
+    workflow: 'service',
+    batchIndex: 1,
+    batchCount: 1,
+    mappingVersion: 2,
+    rows: [
+      {
+        sourceId: 'synthetic-row-a',
+        sourceVersion: 'version-a',
+        name: 'Sample Contact',
+        email: 'sample.contact@emerson.org',
+        sourceFieldColumns: {
+          sourceId: 'Source ID',
+          sourceVersion: 'Source Version',
+          name: 'Name',
+          email: 'Email',
+        },
+        ...pending,
+      },
+    ],
+  }
+  const { assignmentResponse, assignmentBody } = await previewAndAssign(
+    managerPreview,
+    'intern-1',
+  )
+  expect(assignmentResponse.status).toBe(200)
+  const assignment = assignmentBody.record
+  expect(assignment.data).toMatchObject({
+    assignmentType: 'intake',
+    assigneeId: 'intern-1',
+    batchType: 'contacts',
+    sourceVersion: 'version-a',
+    workflow: 'service',
+  })
+  expect(
+    (
+      await call({
+        action: 'intake-assignment-create',
+        assigneeId: 'intern-1',
+        receiptId: assignment.data.receiptId,
+      })
+    ).status,
+  ).toBe(200)
+  expect(
+    fixture.records.filter((record) => record.data.assignmentType === 'intake'),
+  ).toHaveLength(1)
+
+  const preview = {
+    action: 'intake-preview',
+    assignmentId: assignment.id,
+    batchType: 'contacts',
+    sourceName: 'Synthetic bounded contact batch',
+    sourceVersion: 'version-a',
+    workflow: 'service',
+    batchIndex: 1,
+    batchCount: 1,
+    mappingVersion: 2,
+    rows: [
+      {
+        sourceId: 'synthetic-row-a',
+        sourceVersion: 'version-a',
+        name: 'Sample Contact',
+        email: 'sample.contact@emerson.org',
+        sourceFieldColumns: {
+          sourceId: 'Source ID',
+          sourceVersion: 'Source Version',
+          name: 'Name',
+          email: 'Email',
+        },
+        ...pending,
+      },
+    ],
+  }
+  fixture.user = { id: 'intern-1' }
+  const wrongBatch = await call({
+    ...preview,
+    batchIndex: 2,
+  })
+  expect([400, 403]).toContain(wrongBatch.status)
+  expect((await call({ ...preview, sourceVersion: 'version-b' })).status).toBe(
+    403,
+  )
+  const tampered = structuredClone(preview)
+  tampered.rows[0].name = 'Substituted Contact'
+  expect((await call(tampered)).status).toBe(403)
+  expect((await call({ ...preview, assignmentId: undefined })).status).toBe(403)
+  const assignedPreview = await call(preview)
+  expect(assignedPreview.status, await assignedPreview.clone().text()).toBe(200)
+  const intake = fixture.records.find((record) => record.kind === 'intake')!
+  expect(intake).toMatchObject({
+    ownerId: 'staff-owner',
+    access: 'record',
+    data: {
+      batchAssignmentId: assignment.id,
+      assigneeId: 'intern-1',
+      batchType: 'contacts',
+      status: 'ready',
+    },
+  })
+  const receipt = fixture.records.find(
+    (record) => record.kind === 'import' && record.data.batchId,
+  )!
+  expect(receipt).toMatchObject({
+    ownerId: 'staff-owner',
+    data: { assigneeId: 'intern-1', assignmentId: assignment.id },
+  })
+  fixture.user = { id: 'outsider' }
+  expect((await call(preview)).status).toBe(403)
+  fixture.user = { id: 'intern-1' }
+  expect(
+    (await call({ ...preview, assignmentId: 'different-assignment' })).status,
+  ).toBe(403)
+
+  const applied = await call({
+    action: 'intake-review',
+    id: intake.id,
+    revision: intake.revision,
+    assignmentId: assignment.id,
+    decision: 'apply',
+    reason: 'Synthetic assigned sample reviewed',
+  })
+  expect(applied.status).toBe(200)
+  expect(
+    fixture.records.filter((record) => record.kind === 'contact'),
+  ).toHaveLength(1)
+  expect(
+    fixture.records.find((record) => record.kind === 'contact'),
+  ).toMatchObject({
+    ownerId: 'staff-owner',
+    access: 'record',
+    data: { suppressed: false, contactPermission: 'Unknown' },
+  })
+  const updatedReceipt = fixture.records.find(
+    (record) => record.id === receipt.id,
+  )!
+  expect(updatedReceipt.data.counts).toMatchObject({
+    accepted: 1,
+    created: 1,
+    matched: 0,
+    held: 0,
+    failed: 0,
+    reviewReady: 0,
+    open: 0,
+  })
+  const appliedRetry = await call(preview)
+  expect(appliedRetry.status).toBe(200)
+  const retryBody = await appliedRetry.json()
+  expect(retryBody.receipt.batchId).toBe(
+    (await (await call(preview)).json()).receipt.batchId,
+  )
+  expect(retryBody.summary).toMatchObject({
+    accepted: 1,
+    created: 1,
+    matched: 0,
+    existingRows: 1,
+  })
+  expect(
+    fixture.records.filter((record) => record.kind === 'contact'),
+  ).toHaveLength(1)
+})
+
+it('counts a reviewed existing-contact link as matched and preserves suppression', async () => {
+  fixture.members = [
+    member('owner', false, 'staff-owner'),
+    member('contributor', false, 'intern-1'),
+  ]
+  const existingContact = row(
+    'contact',
+    'existing-contact',
+    {
+      email: 'existing@northwind.org',
+      suppressed: true,
+      contactPermission: 'Do not contact',
+      ...pending,
+    },
+    { access: 'team' },
+  )
+  fixture.records = [existingContact]
+  const managerPreview = {
+    action: 'intake-preview',
+    batchType: 'contacts',
+    sourceName: 'Synthetic match batch',
+    workflow: 'service',
+    batchIndex: 1,
+    batchCount: 1,
+    mappingVersion: 2,
+    rows: [
+      {
+        sourceId: 'match-row',
+        sourceVersion: 'version-a',
+        name: 'Existing Contact',
+        email: 'existing@northwind.org',
+        ...pending,
+      },
+    ],
+  }
+  const { assignmentResponse, assignmentBody } = await previewAndAssign(
+    managerPreview,
+    'intern-1',
+  )
+  expect(assignmentResponse.status).toBe(200)
+  const assignmentId = assignmentBody.record.id
+  fixture.user = { id: 'intern-1' }
+  const preview = await call({
+    action: 'intake-preview',
+    assignmentId,
+    batchType: 'contacts',
+    sourceName: 'Synthetic match batch',
+    sourceVersion: 'version-a',
+    workflow: 'service',
+    batchIndex: 1,
+    batchCount: 1,
+    mappingVersion: 2,
+    rows: [
+      {
+        sourceId: 'match-row',
+        sourceVersion: 'version-a',
+        name: 'Existing Contact',
+        email: 'existing@northwind.org',
+        ...pending,
+      },
+    ],
+  })
+  expect(preview.status, await preview.clone().text()).toBe(200)
+  const queue = fixture.records.find((record) => record.kind === 'intake')!
+  expect(queue.data.status).toBe('duplicate')
+  const receipt = fixture.records.find(
+    (record) => record.kind === 'import' && record.data.batchId,
+  )!
+  expect(receipt.data.counts).toMatchObject({ held: 1, matched: 0 })
+  const apply = await call({
+    action: 'intake-review',
+    id: queue.id,
+    revision: queue.revision,
+    assignmentId,
+    decision: 'apply',
+    personId: existingContact.id,
+    reason: 'Synthetic exact email confirmed',
+  })
+  expect(apply.status).toBe(200)
+  expect(
+    fixture.records.filter((record) => record.kind === 'contact'),
+  ).toHaveLength(1)
+  expect(
+    fixture.records.find((record) => record.kind === 'engagement')?.data,
+  ).toMatchObject({
+    suppressed: true,
+    contactPermission: 'Do not contact',
+  })
+  expect(receipt.data.counts).toMatchObject({
+    accepted: 1,
+    created: 0,
+    matched: 1,
+    held: 0,
+    failed: 0,
+    open: 0,
+  })
+})
+
+it('denies HR operators and never assigns restricted applicant workflows', async () => {
+  fixture.members = [
+    member('owner', false, 'staff-owner'),
+    member('contributor', true, 'hr-operator'),
+    member('contributor', false, 'intern-1'),
+  ]
+  const restrictedPreview = await call({
+    action: 'intake-preview',
+    sourceName: 'Synthetic restricted applicant sample',
+    workflow: 'program',
+    rows: [
+      {
+        sourceId: 'restricted-sample-row',
+        sourceVersion: 'version-a',
+        name: 'Synthetic Applicant',
+        email: 'applicant@review.invalid',
+        ...pending,
+      },
+    ],
+  })
+  const restrictedReceipt = (await restrictedPreview.json()).receipt
+  expect(
+    (
+      await call({
+        action: 'intake-assignment-create',
+        assigneeId: 'hr-operator',
+        receiptId: restrictedReceipt.id,
+      })
+    ).status,
+  ).toBe(403)
+  expect(
+    (
+      await call({
+        action: 'intake-assignment-create',
+        assigneeId: 'intern-1',
+        receiptId: restrictedReceipt.id,
+      })
+    ).status,
+  ).toBe(403)
+  const managerPreview = {
+    action: 'intake-preview',
+    batchType: 'contacts',
+    sourceName: 'Synthetic HR denial batch',
+    workflow: 'service',
+    batchIndex: 1,
+    batchCount: 1,
+    mappingVersion: 2,
+    rows: [
+      {
+        sourceId: 'hr-row',
+        sourceVersion: 'version-a',
+        name: 'No disclosure',
+        email: 'private@example.com',
+        ...pending,
+      },
+    ],
+  }
+  const { assignmentBody } = await previewAndAssign(managerPreview, 'intern-1')
+  const assignment = assignmentBody.record
+  const assignedIntake = fixture.records.find(
+    (record) => record.kind === 'intake',
+  )!
+  const assignedReceipt = fixture.records.find(
+    (record) => record.kind === 'import' && record.data.batchId,
+  )!
+  fixture.records.find(
+    (record) => record.id === assignment.id,
+  )!.data.assigneeId = 'hr-operator'
+  assignedIntake.data.assigneeId = 'hr-operator'
+  assignedReceipt.data.assigneeId = 'hr-operator'
+  fixture.user = { id: 'hr-operator' }
+  expect(
+    (
+      await call({
+        action: 'intake-preview',
+        assignmentId: assignment.id,
+        batchType: 'contacts',
+        sourceName: 'Synthetic HR denial batch',
+        sourceVersion: 'version-a',
+        workflow: 'service',
+        batchIndex: 1,
+        batchCount: 1,
+        mappingVersion: 2,
+        rows: managerPreview.rows,
+      })
+    ).status,
+  ).toBe(403)
+})
+
+it('imports a bounded organization and resource sample into separate record kinds only', async () => {
+  fixture.members = [
+    member('owner', false, 'staff-owner'),
+    member('contributor', false, 'intern-1'),
+  ]
+  fixture.records = [
+    row(
+      'organization',
+      'existing-org',
+      { website: 'https://existing.example.com' },
+      { title: 'Existing Service Organization', access: 'team' },
+    ),
+  ]
+  const assign = async (previewRequest: unknown) => {
+    const { assignmentResponse, assignmentBody } = await previewAndAssign(
+      previewRequest,
+      'intern-1',
+    )
+    expect(assignmentResponse.status).toBe(200)
+    return assignmentBody.record.id as string
+  }
+  const orgRequest = {
+    action: 'intake-preview',
+    batchType: 'organizations',
+    sourceName: 'Synthetic org sample',
+    sourceVersion: 'bounded-v1',
+    batchIndex: 1,
+    batchCount: 1,
+    mappingVersion: 2,
+    rows: [
+      {
+        sourceId: 'org-row-1',
+        sourceVersion: 'bounded-v1',
+        name: 'New Pilot Service Organization',
+        website: 'https://new-service.example.com',
+        sourceFieldColumns: { sourceId: 'ID', name: 'Organization' },
+        ...pending,
+      },
+    ],
+  }
+  const orgAssignmentId = await assign(orgRequest)
+  fixture.user = { id: 'intern-1' }
+  const orgPreview = await call({
+    ...orgRequest,
+    assignmentId: orgAssignmentId,
+  })
+  const orgBody = await orgPreview.json()
+  expect(orgBody.summary.total).toBe(1)
+  expect(orgBody.summary.reviewReady).toBe(1)
+  const orgQueue = orgBody.rows[0]
+  const orgApplied = await call({
+    action: 'intake-review',
+    id: orgQueue.id,
+    revision: orgQueue.revision,
+    assignmentId: orgAssignmentId,
+    decision: 'apply',
+    reason: 'Synthetic organization sample reviewed',
+  })
+  expect(orgApplied.status).toBe(200)
+  const createdOrganization = fixture.records.find(
+    (record) =>
+      record.kind === 'organization' && record.sourceKey === orgQueue.sourceKey,
+  )!
+  expect(createdOrganization.data).toMatchObject({
+    sourceVersion: 'bounded-v1',
+    fieldProvenance: {
+      name: expect.objectContaining({ sourceColumn: 'Organization' }),
+    },
+  })
+  expect(
+    fixture.records.filter((record) => record.kind === 'contact'),
+  ).toHaveLength(0)
+  expect(
+    fixture.records.filter((record) => record.kind === 'resource'),
+  ).toHaveLength(0)
+  const orgReceipt = fixture.records.find(
+    (record) => record.kind === 'import' && record.data.batchId,
+  )!
+  expect(orgReceipt.data.counts).toMatchObject({
+    created: 1,
+    matched: 0,
+    held: 0,
+    failed: 0,
+  })
+
+  const resourceRequest = {
+    action: 'intake-preview',
+    batchType: 'resources',
+    sourceName: 'Synthetic service sample',
+    sourceVersion: 'bounded-v1',
+    batchIndex: 1,
+    batchCount: 1,
+    mappingVersion: 2,
+    rows: [
+      {
+        sourceId: 'resource-row-1',
+        sourceVersion: 'bounded-v1',
+        name: 'Pilot service guide',
+        resourceType: 'template',
+        body: 'Synthetic instructions only',
+        organization: 'Existing Service Organization',
+        sourceFieldColumns: {
+          sourceId: 'ID',
+          sourceVersion: 'Version',
+          name: 'Title',
+          body: 'Content',
+          organization: 'Organization',
+        },
+      },
+    ],
+  }
+  fixture.user = { id: 'staff-owner' }
+  const resourceAssignmentId = await assign(resourceRequest)
+  const resourcePreview = await call({
+    ...resourceRequest,
+    assignmentId: resourceAssignmentId,
+  })
+  const resourceBody = await resourcePreview.json()
+  expect(resourceBody.summary.total).toBe(1)
+  expect(resourceBody.summary.reviewReady).toBe(1)
+  const resourceQueue = resourceBody.rows[0]
+  const resourceApplied = await call({
+    action: 'intake-review',
+    id: resourceQueue.id,
+    revision: resourceQueue.revision,
+    assignmentId: resourceAssignmentId,
+    decision: 'apply',
+    reason: 'Synthetic resource sample reviewed',
+  })
+  expect(resourceApplied.status).toBe(200)
+  const resource = fixture.records.find(
+    (record) =>
+      record.kind === 'resource' &&
+      record.sourceKey === resourceQueue.sourceKey,
+  )!
+  expect(resource).toMatchObject({
+    kind: 'resource',
+    access: 'record',
+    organizationId: 'existing-org',
+    data: {
+      resourceType: 'template',
+      status: 'Needs review',
+      audience: 'team',
+      sourceVersion: 'bounded-v1',
+      fieldProvenance: {
+        body: expect.objectContaining({ sourceColumn: 'Content' }),
+      },
+    },
+  })
+  expect(
+    fixture.records.filter((record) => record.kind === 'contact'),
+  ).toHaveLength(0)
+  const resourceReceipt = fixture.records.filter(
+    (record) =>
+      record.kind === 'import' && record.data.batchType === 'resources',
+  )[0]
+  expect(resourceReceipt.data.counts).toMatchObject({
+    created: 1,
+    matched: 0,
+    held: 0,
+    failed: 0,
+  })
+})
+
+it('gives each content and mapping version a stable batch identity', async () => {
+  const preview = {
+    action: 'intake-preview',
+    sourceName: 'Synthetic source v1',
+    workflow: 'class',
+    batchIndex: 1,
+    batchCount: 2,
+    mappingVersion: 2,
+    rows: [
+      {
+        ...pending,
+        sourceId: 'synthetic-batch-row-1',
+        sourceVersion: 'version-1',
+        name: 'Synthetic applicant',
+        email: 'applicant@review.invalid',
+      },
+    ],
+  }
+  const first = await call(preview)
+  expect(first.status).toBe(200)
+  const firstBody = await first.json()
+  const retry = await call(preview)
+  expect(retry.status).toBe(200)
+  const retryBody = await retry.json()
+  expect(retryBody.receipt).toMatchObject({
+    id: firstBody.receipt.id,
+    batchId: firstBody.receipt.batchId,
+  })
+
+  const remapped = await call({ ...preview, mappingVersion: 3 })
+  expect(remapped.status).toBe(200)
+  const remappedBody = await remapped.json()
+  expect(remappedBody.receipt.batchId).not.toBe(firstBody.receipt.batchId)
+  expect(remappedBody.receipt.mappingVersion).toBe(3)
+
+  const changed = await call({
+    ...preview,
+    mappingVersion: 3,
+    rows: [{ ...preview.rows[0], sourceVersion: 'version-2' }],
+  })
+  expect(changed.status).toBe(200)
+  const changedBody = await changed.json()
+  expect(changedBody.receipt.batchId).not.toBe(remappedBody.receipt.batchId)
+  expect(changedBody.receipt.id).not.toBe(remappedBody.receipt.id)
+  expect(fixture.records.filter((r) => r.kind === 'import')).toHaveLength(3)
+
+  const changedRetry = await call({
+    ...preview,
+    mappingVersion: 3,
+    rows: [{ ...preview.rows[0], sourceVersion: 'version-2' }],
+  })
+  expect((await changedRetry.json()).receipt).toMatchObject({
+    id: changedBody.receipt.id,
+    batchId: changedBody.receipt.batchId,
+  })
+  expect(fixture.records.filter((r) => r.kind === 'import')).toHaveLength(3)
+})
+
+it('counts invalid source rows as failed and resolves them on exclusion', async () => {
+  const preview = await call({
+    action: 'intake-preview',
+    sourceName: 'Invalid source',
+    workflow: 'program',
+    rows: [
+      {
+        ...pending,
+        sourceId: 'invalid-row-1',
+        name: 'Applicant Row',
+        email: 'malformed',
+      },
+    ],
+  })
+  expect(preview.status).toBe(200)
+  const body = await preview.json()
+  const intake = fixture.records.find((record) => record.kind === 'intake')!
+  expect(body.summary).toMatchObject({
+    failed: 1,
+    held: 0,
+    reviewReady: 0,
+    open: 1,
+  })
+  expect(body.receipt.status).toBe('queued for review')
+
+  const exclusion = await call({
+    action: 'intake-review',
+    id: intake.id,
+    revision: intake.revision,
+    decision: 'exclude',
+    reason: 'Invalid synthetic email fixture',
+  })
+  expect(exclusion.status).toBe(200)
+  expect(
+    fixture.records.find((record) => record.kind === 'import')?.data,
+  ).toMatchObject({
+    status: 'reviewed',
+    counts: { failed: 0, excluded: 1, held: 0, reviewReady: 0, open: 0 },
+    blockers: [],
+  })
+})
+
+it('keeps applicant preview and its batch receipt behind explicit HR authority', async () => {
+  const requestBody = {
+    action: 'intake-preview',
+    sourceName: 'Restricted application source',
+    workflow: 'program',
+    rows: [
+      {
+        ...pending,
+        sourceId: 'application-row-1',
+        name: 'Synthetic applicant',
+        email: 'applicant@review.invalid',
+      },
+    ],
+  }
+  fixture.members = [member('manager', false)]
+  expect((await call(requestBody)).status).toBe(403)
+  expect(fixture.records).toEqual([])
+  fixture.members = [member('manager', true)]
+  const allowed = await call(requestBody)
+  expect(allowed.status).toBe(200)
+  expect(fixture.records.find((r) => r.kind === 'intake')?.access).toBe('hr')
+  expect(fixture.records.find((r) => r.kind === 'import')?.access).toBe('hr')
+})
+
+it('rejects source timestamps without timezone and repeated stable row IDs atomically', async () => {
+  const invalidTimestamp = await call({
+    action: 'intake-preview',
+    sourceName: 'Authoritative HR timestamps',
+    workflow: 'program',
+    rows: [
+      {
+        ...pending,
+        sourceId: 'source-row-1',
+        sourceUpdatedAt: '2026-10-28T16:30:00',
+        name: 'Casey Emerson',
+        email: 'casey@emerson.example',
+      },
+    ],
+  })
+  expect(invalidTimestamp.status).toBe(400)
+  expect(await invalidTimestamp.text()).toContain('explicit timezone offset')
+  expect(fixture.records).toEqual([])
+  const repeatedIds = await call({
+    action: 'intake-preview',
+    sourceName: 'Authoritative HR repeated IDs',
+    workflow: 'program',
+    rows: [
+      {
+        ...pending,
+        sourceId: 'same-row',
+        name: 'Casey Emerson',
+        email: 'casey@emerson.example',
+      },
+      {
+        ...pending,
+        sourceId: 'same-row',
+        name: 'Casey Emerson',
+        email: 'casey@emerson.example',
+      },
+    ],
+  })
+  expect(repeatedIds.status).toBe(400)
+  expect(await repeatedIds.text()).toContain('repeated stable source row IDs')
+  expect(fixture.records).toEqual([])
 })
 it('rejects unsafe applicant resume links atomically during restricted intake preview', async () => {
   const response = await call({
@@ -950,8 +1809,12 @@ it.each([
       cohort: mapped.cohort,
       resumeUrl: mapped.resumeUrl,
     })
-    expect(fixture.audit).toHaveLength(auditBefore + 1)
-    expect(fixture.audit.at(-1)).toMatchObject({
+    expect(fixture.audit).toHaveLength(auditBefore + 2)
+    expect(
+      fixture.audit
+        .filter((entry) => entry.action === 'intake source changed')
+        .at(-1),
+    ).toMatchObject({
       recordId: original.id,
       actorId: 'staff-owner',
     })
@@ -960,7 +1823,7 @@ it.each([
     expect(fixture.records.find((record) => record.id === held.id)).toEqual(
       heldSnapshot,
     )
-    expect(fixture.audit).toHaveLength(auditBefore + 1)
+    expect(fixture.audit).toHaveLength(auditBefore + 2)
     expect(
       (
         await call({
@@ -992,17 +1855,30 @@ it.each([
       expect(response.status).toBe(400)
       expect(await response.text()).toMatch(/source.*changed|changed.*source/i)
     }
-    expect(
-      (
-        await call({
-          action: 'intake-review',
-          id: held.id,
-          revision: held.revision,
-          decision: 'exclude',
-          reason: 'Exclude changed source until reconciled',
-        })
-      ).status,
-    ).toBe(200)
+    const exclusion = await call({
+      action: 'intake-review',
+      id: held.id,
+      revision: held.revision,
+      decision: 'exclude',
+      reason: 'Exclude changed source until reconciled',
+    })
+    expect(exclusion.status).toBe(200)
+    const batchReceipts = fixture.records.filter(
+      (record) => record.kind === 'import',
+    )
+    expect(batchReceipts).toHaveLength(2)
+    for (const receipt of batchReceipts)
+      expect(receipt.data).toMatchObject({
+        status: 'reviewed',
+        counts: {
+          excluded: 1,
+          failed: 0,
+          held: 0,
+          reviewReady: 0,
+          open: 0,
+        },
+        blockers: [],
+      })
     const excluded = structuredClone(
       fixture.records.find((record) => record.id === held.id)!,
     )
@@ -1106,7 +1982,12 @@ it('deduplicates restricted resolved-source observations and rejects the batch w
   }
   for (let attempt = 0; attempt < 2; attempt++) {
     expect((await call(changedBatch)).status).toBe(409)
-    expect(fixture.records).toEqual([receipt])
+    expect(
+      fixture.records.filter((record) => record.kind === 'intake'),
+    ).toEqual([receipt])
+    expect(
+      fixture.records.filter((record) => record.kind === 'import'),
+    ).toHaveLength(1)
     expect(fixture.audit).toHaveLength(auditBefore + 1)
   }
   const observation = fixture.audit.at(-1)!
