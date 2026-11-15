@@ -11,7 +11,10 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "pnpm routes:generate && vitest run",
-    "routes:generate": "node scripts/generate-routes.mjs"
+    "routes:generate": "node scripts/generate-routes.mjs",
+    "studio:review:build": "node scripts/build-project-studio-review.mjs",
+    "studio:review:serve": "node scripts/project-studio-review-server.mjs",
+    "studio:verify-isolation": "node scripts/verify-project-studio-isolation.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "5.9.1",

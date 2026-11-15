@@ -24,5 +24,6 @@ jobs:
       - run: pnpm test
       - run: pnpm lint
       - run: pnpm build
+      - run: pnpm studio:verify-isolation
       - name: SQL acceptance boundary
         run: echo "Windows loopback PostgreSQL suites are intentionally opt-in and skipped on Linux. Their separate fresh-cluster local evidence remains required. No hosted credentials are used by this job."
